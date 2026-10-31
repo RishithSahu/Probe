@@ -25,7 +25,7 @@ from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.schemas import Assessment, AssessmentPolicy, AssessmentStatus, NetworkGraph
 from app.database import repository
-from app.database.session import session_scope
+from app.database.session import init_db, session_scope
 from app.orchestrator.autonomous_loop import run_concurrent_iteration, run_next_iteration
 
 logger = logging.getLogger("ape.orchestrator.cli")
@@ -106,6 +106,11 @@ def _load_or_create(
 
 def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: str | None = None, *,
        probe_port: int = 8080, probe_minutes: float = 5.0, max_inflight: int = 1) -> int:
+    # Unlike app.main's FastAPI service, this standalone CLI never otherwise calls init_db(): a brand-new
+    # environment with no evidence/ape.db yet (a genuinely clean run, not a resume) would hit a bare
+    # "no such table" OperationalError the moment _load_or_create below reads the database. Base.metadata.
+    # create_all is a no-op against an already-current schema, so this is always safe to call, every run.
+    init_db()
     policy = _load_or_create(assessment_id, scope, network_graph_path, probe_port=probe_port, probe_minutes=probe_minutes)
     output_dir = Path(settings.evidence_dir) / assessment_id / "autonomous"
     deadline = time.monotonic() + max_minutes * 60
