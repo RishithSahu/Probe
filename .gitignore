@@ -20,3 +20,7 @@ inputs/binaries/*
 .idea/
 .vscode/
 *.log
+
+# Network Discovery Probe (teammate's component)
+probe-data/
+probe-scope.txt

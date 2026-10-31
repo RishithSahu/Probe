@@ -1,0 +1,23 @@
+# Optional OS-level enforcement for Linux, independent of the application.
+# Run Probe inside a network namespace / container whose egress goes through these rules, or
+# load them on the scanner host. Edit SCOPE to match the authorised range, then:  nft -f nftables.nft
+define SCOPE = 10.20.30.0/24     # <- replace with YOUR authorised range
+
+table inet probe_scope {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oif "lo" accept
+    ip daddr $SCOPE accept          # IPv4 probes: only the authorised range
+    ct state established,related accept
+    # everything else (other IPv4, IPv6, multicast, broadcast) is dropped and counted
+    counter drop
+  }
+}
+
+# ARP is not covered by the inet family: restrict who-has targets too.
+table arp probe_scope_arp {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    arp operation request arp daddr ip $SCOPE accept
+  }
+}

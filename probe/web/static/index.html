@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probe</title>
+<style>
+  :root { --fg:#1a1a1a; --mut:#6b6b6b; --line:#d8d8d8; --bg:#fff; --warn:#b00020; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e8e8; --mut:#9a9a9a; --line:#333; --bg:#111; --warn:#ff6b81; } }
+  body { margin:0; padding:16px; font:14px/1.45 ui-monospace, Menlo, Consolas, monospace; color:var(--fg); background:var(--bg); }
+  h2 { font-size:13px; font-weight:600; margin:24px 0 8px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); }
+  #status { color:var(--mut); }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:4px 10px 4px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:400; }
+  .held { color:var(--warn); }
+  #graph { width:100%; height:420px; border:1px solid var(--line); }
+  #graph text { fill:var(--fg); font-size:11px; }
+  #graph line { stroke:var(--mut); stroke-width:1; }
+  #graph line.route { stroke-dasharray:4 3; }
+  #graph .node { fill:var(--bg); stroke:var(--fg); }
+  #graph .seg { fill:none; stroke:var(--warn); stroke-dasharray:4 3; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<div id="status">loadingâ€¦</div>
+
+<h2>Segments</h2>
+<div class="scroll"><table id="segments"></table></div>
+
+<h2>Devices</h2>
+<div class="scroll"><table id="hosts"></table></div>
+
+<h2>Unconfirmed (not reported as networks)</h2>
+<div class="scroll"><table id="leads"></table></div>
+
+<h2>Connections</h2>
+<svg id="graph" role="img" aria-label="Network connection graph"></svg>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function row(cells, cls) { return `<tr class="${cls || ""}">` + cells.map(c => `<td>${c}</td>`).join("") + "</tr>"; }
+function head(cols) { return "<tr>" + cols.map(c => `<th>${c}</th>`).join("") + "</tr>"; }
+
+function render(s) {
+  const st = s.status || {};
+  $("status").textContent = `${st.phase || "idle"} · ${st.elapsed ?? 0}s · scope ${(st.scope || []).join(", ")} · ` +
+    `${st.answered ?? s.hosts.length} of ${st.addresses_in_scope ?? "?"} addresses answered (${st.silent ?? "?"} silent = undetectable with this probe set) · ` +
+    `${st.packets_sent ?? 0} probes · out-of-scope sent ${st.sent_out_of_scope ?? 0}, blocked ${st.stray_blocked ?? 0} · ` +
+    `passive capture: ${st.passive_visibility || "n/a"}`;
+
+  $("segments").innerHTML = head(["network", "extent (min – max)", "visibility", "via / distance", "state", "proof"]) +
+    (s.segments.length ? s.segments.map(g => { const x = g.extra || {}, h = x.hidden || {};
+      return row([esc(g.cidr) + (x.local ? " (local link)" : ""),
+        esc(x.prefix_known === false ? "prefix unknown" : `${x.covering} – ${x.max_extent}`),
+        `<b>${esc((h.level || "").toUpperCase())}</b> ${esc((h.reasons || []).join("; "))}`,
+        esc((g.via || "–") + (x.distance ? ` / ${x.distance} hops` : "")), esc(g.state),
+        esc(g.evidence.join("; "))], g.state === "held" ? "held" : ""); }).join("")
+      : row(["none found yet", "", "", "", "", ""]));
+
+  $("hosts").innerHTML = head(["ip", "mac", "vendor", "attachment", "answers", "open ports"]) +
+    s.hosts.map(h => row([esc(h.ip), esc(h.mac || "–"), esc(h.vendor || "–"),
+      esc(h.verdict.replace("CONFIRMED_", "").toLowerCase() + (h.distance ? ` (${h.distance} hop)` : "")),
+      esc((h.visible_to || []).join(", ")),
+      esc(h.held ? "not scanned (held segment)" : h.open_ports.map(p => p.port).join(", ") || "–")],
+      h.held ? "held" : "")).join("");
+
+  const lead = s.leads.filter(l => l.source.startsWith("unconfirmed") || l.source === "outside-scope-address" || l.source.startsWith("passive"));
+  $("leads").innerHTML = head(["address", "status", "why it is not a confirmed network"]) +
+    (lead.length ? lead.map(l => row([esc(l.address), esc(l.source.replace("unconfirmed:", "")), esc(l.evidence)])).join("")
+      : row(["none", "", ""]));
+
+  graph(s);
+}
+
+function graph(s) {
+  const svg = $("graph"), W = svg.clientWidth || 800, H = svg.clientHeight || 420;
+  const adj = {}, label = {}, segNodes = new Set();
+  s.edges.forEach(e => { (adj[e.a] ||= []).push(e.b); (adj[e.b] ||= []).push(e.a); });
+  s.segments.forEach(g => { segNodes.add("seg:" + g.cidr); });
+  const root = (s.status || {}).scanner;
+  if (!root || !adj[root]) { svg.innerHTML = ""; return; }
+  const depth = {[root]: 0}, queue = [root];
+  while (queue.length) { const n = queue.shift(); (adj[n] || []).forEach(m => { if (!(m in depth)) { depth[m] = depth[n] + 1; queue.push(m); } }); }
+  const cols = {};
+  Object.keys(depth).forEach(n => (cols[depth[n]] ||= []).push(n));
+  const nCols = Math.max(...Object.keys(cols).map(Number)) + 1, pos = {};
+  Object.entries(cols).forEach(([d, nodes]) => nodes.sort().forEach((n, i) => {
+    pos[n] = [40 + (W - 140) * (d / Math.max(nCols - 1, 1)), 20 + (H - 40) * ((i + .5) / nodes.length)];
+  }));
+  let out = "";
+  s.edges.forEach(e => { if (pos[e.a] && pos[e.b]) out += `<line class="${e.kind}" x1="${pos[e.a][0]}" y1="${pos[e.a][1]}" x2="${pos[e.b][0]}" y2="${pos[e.b][1]}"/>`; });
+  Object.entries(pos).forEach(([n, [x, y]]) => {
+    const isSeg = segNodes.has(n), name = n.startsWith("lan:") ? n.slice(4) : n.startsWith("seg:") ? n.slice(4) : n;
+    out += isSeg ? `<rect class="seg" x="${x - 6}" y="${y - 6}" width="12" height="12"/>` : `<circle class="node" cx="${x}" cy="${y}" r="5"/>`;
+    out += `<text x="${x + 9}" y="${y + 4}">${esc(name)}${n === root ? " (scanner)" : ""}</text>`;
+  });
+  svg.innerHTML = out;
+}
+
+async function tick() {
+  try { render(await (await fetch("/api/state")).json()); } catch (e) { $("status").textContent = "waiting for engineâ€¦"; }
+}
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>

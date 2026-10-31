@@ -1,0 +1,3 @@
+# The authorised range(s) -- this IS the fence. One CIDR per line; nothing outside it is ever probed.
+# Copy to probe-scope.txt (git-ignored), or pass --scope / set PROBE_SCOPE.
+10.20.30.0/24
