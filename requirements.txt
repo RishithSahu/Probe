@@ -6,9 +6,11 @@ pydantic-settings==2.8.1
 langgraph==1.2.19
 
 # Database
+# SQLite is the default (stdlib sqlite3, no extra driver needed). Uncomment
+# psycopg2-binary below only if APE_DATABASE_URL is pointed at PostgreSQL.
 SQLAlchemy==2.0.29
 alembic==1.20.1
-psycopg2-binary==2.9.11
+# psycopg2-binary==2.9.11
 
 # Web Security Agent
 httpx==0.28.1

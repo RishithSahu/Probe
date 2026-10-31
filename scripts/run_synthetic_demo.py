@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Synthetic end-to-end demo — NOT run during development per project
-convention; run this yourself once Postgres is up (e.g. `docker compose up
--d postgres`) and the venv has `requirements.txt` installed.
+convention; run this yourself once the venv has `requirements.txt`
+installed. Uses the default SQLite database (no external service needed) —
+set APE_DATABASE_URL first if you want to point it at something else.
 
 Exercises the full pipeline against the bundled sample network graph
 (tests/fixtures/network_graphs/sample_graph.json) and the synthetic
@@ -10,8 +11,7 @@ targets). Prints the final assessment status and where the JSON/PDF reports
 were written.
 
 Usage:
-    APE_DATABASE_URL=postgresql+psycopg2://ape:ape@localhost:5432/ape \\
-        python scripts/run_synthetic_demo.py
+    python scripts/run_synthetic_demo.py
 """
 from __future__ import annotations
 

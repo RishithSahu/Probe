@@ -1,23 +1,13 @@
 version: "3.9"
 
-services:
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ape
-      POSTGRES_PASSWORD: ape
-      POSTGRES_DB: ape
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ape"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+# No database service: the orchestrator defaults to a SQLite file under the
+# bind-mounted evidence/ directory (persists across `docker compose down`/
+# `up`, visible on the host at ./evidence/ape.db). To use PostgreSQL instead,
+# add a `postgres` service back and set APE_DATABASE_URL accordingly on the
+# orchestrator service below — no code change needed (app/database/session.py
+# builds its engine generically from that URL).
 
+services:
   zap:
     image: ghcr.io/zaproxy/zaproxy:stable
     restart: unless-stopped
@@ -73,7 +63,10 @@ services:
     env_file:
       - .env
     environment:
-      APE_DATABASE_URL: postgresql+psycopg2://ape:ape@postgres:5432/ape
+      # Absolute path (sqlite:////...) under the bind-mounted evidence
+      # volume below, so the database survives container recreation and is
+      # inspectable on the host at ./evidence/ape.db.
+      APE_DATABASE_URL: sqlite:////data/evidence/ape.db
       APE_ZAP_API_URL: http://zap:8080
       APE_EVIDENCE_DIR: /data/evidence
       APE_INPUTS_DIR: /data/inputs
@@ -91,10 +84,5 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
       zap:
         condition: service_started
-
-volumes:
-  postgres-data:

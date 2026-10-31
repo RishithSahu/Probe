@@ -1,15 +1,22 @@
-"""Repository/persistence tests. Requires a reachable PostgreSQL instance
-configured via APE_DATABASE_URL (see docker-compose.yml's `postgres` service
-for the real deployment target). Skipped automatically if unreachable, so
-the rest of the suite still runs on a machine without Docker/Postgres.
+"""Repository/persistence tests.
+
+Run against `APE_DATABASE_URL` if set, otherwise against a throwaway SQLite
+file in a temp directory — no external database service required either
+way, matching the project's SQLite-by-default configuration
+(app/core/config.py). A non-SQLite URL (e.g. PostgreSQL, for a deployment
+that swapped the default) is probed first and the whole module is skipped if
+it's unreachable, so the suite still runs without that service up.
 """
 from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
-from app.core.config import settings
 from app.core.schemas import (
     AgentId,
     Assessment,
@@ -26,15 +33,26 @@ from app.core.schemas import (
 from app.database import repository
 from app.database.models import Base
 
-try:
-    _engine = create_engine(settings.database_url, connect_args={"connect_timeout": 2}, pool_pre_ping=True)
-    with _engine.connect() as _conn:
-        _conn.execute(text("SELECT 1"))
-    _DB_AVAILABLE = True
-except OperationalError:
-    _DB_AVAILABLE = False
+_configured_url = os.environ.get("APE_DATABASE_URL")
 
-pytestmark = pytest.mark.skipif(not _DB_AVAILABLE, reason="PostgreSQL not reachable at APE_DATABASE_URL")
+if _configured_url and not _configured_url.startswith("sqlite"):
+    # A non-default (e.g. PostgreSQL) URL was explicitly configured — probe
+    # it and skip the module if it's not reachable rather than fail the suite.
+    try:
+        _engine = create_engine(_configured_url, connect_args={"connect_timeout": 2}, pool_pre_ping=True)
+        with _engine.connect() as _conn:
+            _conn.execute(text("SELECT 1"))
+        _DB_AVAILABLE = True
+    except OperationalError:
+        _DB_AVAILABLE = False
+else:
+    # Default path: a private SQLite file, no network/service dependency at all.
+    _tmp_db_path = Path(tempfile.gettempdir()) / "ape_test_repository.db"
+    _tmp_db_path.unlink(missing_ok=True)
+    _engine = create_engine(f"sqlite:///{_tmp_db_path}", connect_args={"check_same_thread": False})
+    _DB_AVAILABLE = True
+
+pytestmark = pytest.mark.skipif(not _DB_AVAILABLE, reason="configured APE_DATABASE_URL is not reachable")
 
 
 @pytest.fixture

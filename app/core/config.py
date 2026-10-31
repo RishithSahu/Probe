@@ -20,9 +20,15 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")  # development | hackathon | production
 
     # --- Database -----------------------------------------------------------
+    # SQLite by default — zero external services to stand up for a hackathon
+    # dev/demo environment. The file lives under evidence/ so it's covered by
+    # the same persistent volume/bind-mount as everything else. Swap this for
+    # another SQLAlchemy URL (e.g. PostgreSQL) if a shared/concurrent-write
+    # deployment is needed later; app/database/session.py's only SQLite-
+    # specific behaviour is the `check_same_thread` connect arg below.
     database_url: str = Field(
-        default="postgresql+psycopg2://ape:ape@localhost:5432/ape",
-        description="SQLAlchemy connection string for PostgreSQL.",
+        default="sqlite:///evidence/ape.db",
+        description="SQLAlchemy connection string. Defaults to a local SQLite file.",
     )
 
     # --- Storage --------------------------------------------------------------

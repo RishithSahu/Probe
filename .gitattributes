@@ -1,0 +1,7 @@
+# Force LF line endings for files that run inside Linux containers,
+# regardless of the checkout platform (this repo is often edited on
+# Windows) — a CRLF shebang line breaks exec() in the container with a
+# misleading "no such file or directory" error.
+*.sh text eol=lf
+docker/** text eol=lf
+scripts/ghidra/*.py text eol=lf
