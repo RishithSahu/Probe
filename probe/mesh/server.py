@@ -33,9 +33,9 @@ def dispatch(hub: Hub, svc: ProbeService, method: str, path: str, q: dict, body:
             if path == "/mesh/lease":
                 return 200, hub.lease(body["agent_id"])
             if path == "/mesh/submit":
-                return 200, hub.submit(body["agent_id"], body["key"], body.get("payload") or {})
+                return 200, hub.submit(body["agent_id"], body["key"], body.get("payload") or {}, body["lease_token"])
             if path == "/mesh/fail":
-                return 200, hub.fail(body["agent_id"], body["key"], body.get("error", ""))
+                return 200, hub.fail(body["agent_id"], body["key"], body.get("error", ""), body["lease_token"])
             if path == "/mesh/plan":
                 return 200, hub.plan(scope=body.get("scope"), shard_size=int(body.get("shard_size", 256)),
                                      enrich=bool(body.get("enrich", True)), force=bool(body.get("force", False)))

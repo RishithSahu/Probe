@@ -4,6 +4,7 @@ One file, zero external services, so judges can run this with nothing but Python
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -87,7 +88,7 @@ CREATE TABLE IF NOT EXISTS agents (          -- mesh: every clone that registere
 CREATE TABLE IF NOT EXISTS tasks (           -- mesh: units of work leased to agents
     key TEXT PRIMARY KEY, scan_id INTEGER, type TEXT NOT NULL, payload TEXT NOT NULL,
     status TEXT NOT NULL,                     -- pending | leased | done | failed
-    agent TEXT, lease_expires REAL, attempts INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL,
+    agent TEXT, lease_expires REAL, lease_token TEXT, attempts INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL,
     finished REAL, result TEXT
 );
 CREATE TABLE IF NOT EXISTS scans (
@@ -136,13 +137,57 @@ class Store:
                 pass
         for tbl, col, ddl in (("hosts", "hostname", "TEXT"), ("hosts", "hostname_source", "TEXT"), ("hosts", "os_detail", "TEXT"),
                               ("hosts", "device_type", "TEXT"), ("ports", "method", "TEXT"), ("ports", "found_at", "TEXT"), ("ports", "identification", "TEXT"),
-                              ("ports", "ident_note", "TEXT")):
+                              ("ports", "ident_note", "TEXT"), ("tasks", "lease_token", "TEXT")):
             try:
                 self._conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {ddl}")
             except sqlite3.OperationalError:
                 pass
         self.exec, self.query = self._x, self._q         # public handles for the mesh layer
         self._conn.commit()
+        # Autocommit from here on: every OTHER method in this class still calls self._conn.commit() right
+        # after its own execute(s), which is now a harmless no-op (nothing left to commit) rather than a
+        # behaviour change. This is what lets claim_task() below issue its own explicit BEGIN IMMEDIATE /
+        # COMMIT / ROLLBACK for one atomic select-and-claim, instead of fighting sqlite3's own implicit
+        # transaction management (which does not let you choose IMMEDIATE locking).
+        self._conn.isolation_level = None
+
+    def claim_task(self, is_eligible, agent_id: str, lease_ttl: float, now: float) -> dict | None:
+        """Atomically select the first pending task `is_eligible` accepts and lease it to `agent_id` --
+        select-and-claim as one SQLite transaction (BEGIN IMMEDIATE), not a SELECT followed by a separate
+        UPDATE. BEGIN IMMEDIATE takes SQLite's write lock for the whole decision, so two callers (threads in
+        this process, or separate processes/connections sharing this db file) can never both decide to claim
+        the same task: the second caller's BEGIN IMMEDIATE simply waits until the first one commits, by
+        which point the task it was looking at is no longer pending. The UPDATE's own rowcount is still
+        checked afterwards and must be exactly 1 before a task is ever returned -- "never return a task
+        unless the lease was successfully acquired," not merely "assumed to have been acquired."
+        Returns the claimed task's row (as a dict, with a fresh `lease_token` the caller must present back
+        on submit/fail for fencing) or None if nothing eligible was pending."""
+        token = secrets.token_hex(12)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    "SELECT * FROM tasks WHERE status='pending' ORDER BY created, key"
+                ).fetchall()
+                for row in rows:
+                    t = dict(row)
+                    if not is_eligible(t):
+                        continue
+                    cur = self._conn.execute(
+                        "UPDATE tasks SET status='leased', agent=?, lease_expires=?, lease_token=? "
+                        "WHERE key=? AND status='pending'",
+                        (agent_id, now + lease_ttl, token, t["key"]),
+                    )
+                    if cur.rowcount != 1:
+                        continue  # lost a race that should be impossible under BEGIN IMMEDIATE; try the next candidate
+                    self._conn.execute("COMMIT")
+                    t.update(status="leased", agent=agent_id, lease_expires=now + lease_ttl, lease_token=token)
+                    return t
+                self._conn.execute("COMMIT")   # nothing eligible -- release the write lock, claim nothing
+                return None
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def reset(self) -> None:
         with self._lock:

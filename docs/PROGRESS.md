@@ -658,3 +658,74 @@ the authorised `NetworkGraph`.
   test, uses the fixture crawl so it runs without a real `katana` binary
   in CI) proving ZAP now scans more than one target per run. Full suite:
   **461 passed, 4 skipped**.
+
+- **Entry 10** — Scoped the first item of a 14-item concurrency/scaling
+  request (atomic multi-worker task leasing, scope partitioning,
+  deduplication, a concurrent scheduler, worker pools, resource limits,
+  PostgreSQL, a generic evidence-driven dependency graph, a one-command
+  multi-worker CLI, real concurrency tests, and a load/scaling
+  demonstration). Given the size, did item 1 ("fix Probe's task-leasing
+  race first," as explicitly requested) for real, end to end, rather than
+  attempt all 14 superficially. **The rest (items 2-14) are not done** —
+  noted here so this entry can't be misread later as more complete than
+  it is.
+
+  **The race, as it actually was**: `Hub.lease()` ran a `SELECT` for a
+  pending task the caller is eligible for, then an `UPDATE ... WHERE
+  status='pending'` to claim it, then unconditionally returned that task
+  to the caller — without ever checking the `UPDATE`'s own row count.
+  Two callers racing the same task could both run their `UPDATE`; only
+  one actually flips a row (the other's `WHERE status='pending'` no
+  longer matches), but the code handed the same task back to *both*
+  callers regardless of which one's write actually won.
+
+  **Fix**: added `Store.claim_task()` (`probe/store.py`) — one atomic
+  select-and-claim, wrapped in an explicit SQLite `BEGIN IMMEDIATE` /
+  `COMMIT` / `ROLLBACK` (not relying solely on the existing in-process
+  `threading.RLock`, which can't protect two separate OS processes
+  sharing one db file), that only ever returns a task whose claiming
+  `UPDATE` reported `rowcount == 1`. `Hub.lease()` now calls this instead
+  of the old select-then-update pair. Needed switching `Store`'s
+  connection to `isolation_level = None` (autocommit) so `claim_task`
+  could issue its own `BEGIN IMMEDIATE` without fighting sqlite3's
+  implicit transaction management — every other `Store` method's
+  trailing `self._conn.commit()` becomes a harmless no-op under this,
+  confirmed by the full suite still passing unchanged.
+
+  **Added real fencing**: a `lease_token` column (`secrets.token_hex(12)`
+  per successful claim) is now required on every `submit`/`fail` call
+  and checked in `_held_task()` before either is allowed to mutate a
+  task — "a stale worker must not be allowed to submit results after its
+  lease expired and another worker reclaimed the task" from the
+  request, verified by test (below), not assumed. Threaded `lease_token`
+  through `probe/mesh/server.py`'s HTTP dispatch and
+  `probe/mesh/worker.py`'s `Worker.run_once()` so the whole register →
+  lease → run → submit/fail path actually carries it, not just
+  `Hub`'s in-process API.
+
+  **New tests** (`tests/test_mesh_concurrency.py`, real `threading` +
+  `Barrier`/`ThreadPoolExecutor`, not sequential mocks): 8 workers racing
+  one task (exactly one wins); 12 workers racing 4 tasks (all 4 claimed,
+  none claimed twice); an expired lease reclaimed by a second agent under
+  a fresh token; the original holder's now-stale token rejected on
+  submit; a wrong token rejected on submit and on fail even from the
+  correct agent; 40 threads hammering `Store.claim_task` directly below
+  `Hub` with one pending task (exactly one winner, one token). Full
+  suite: **468 passed, 4 skipped**, re-run 5x with no flakiness.
+
+  **Explicitly not done, so the next pass knows where it left off**:
+  items 2-14 of the request — configurable scope partitioning by worker
+  count (`split_scope` still takes a manual `shard_size`, not derived
+  from a worker-count argument), task-fingerprint deduplication, the
+  concurrent/dependency-graph scheduler in
+  `app/orchestrator/autonomous_loop.py`/`scheduler.py` (still selects and
+  runs one candidate at a time), multi-worker-per-surface pools on the
+  `app/` side, global/per-surface/per-agent concurrency and resource
+  limits, subprocess cancellation/process-group kill on timeout,
+  PostgreSQL as the shared authoritative store, the generic
+  evidence-graph dependency model (agents still can't publish arbitrary
+  dependent work beyond the existing binary-handoff special case), the
+  `--probe-workers/--web-workers/...` one-command CLI, the remaining
+  concurrency tests (web/network/binary and orchestrator-level), and the
+  load/scaling demonstration across 1/2/4/8+ workers. None of this is
+  claimed as done.

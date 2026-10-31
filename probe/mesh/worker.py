@@ -90,17 +90,19 @@ class Worker:
         task = r.get("task")
         if not task:
             return False
+        token = task["lease_token"]
         if not self._safe_for_me(task):
-            self.hub.call("POST", "/mesh/fail", {"agent_id": self.agent_id, "key": task["key"], "error": "task outside this worker's scope"})
+            self.hub.call("POST", "/mesh/fail", {"agent_id": self.agent_id, "key": task["key"],
+                                                 "error": "task outside this worker's scope", "lease_token": token})
             logger.error("refused task %s: outside my own scope", task["key"])
             return True
         try:
             payload = self.run_scan(task) if task["type"] == "scan" else self.run_enrich(task)
         except Exception as e:                       # a failing task goes back to the queue; the worker lives on
             logger.exception("task %s failed", task["key"])
-            self.hub.call("POST", "/mesh/fail", {"agent_id": self.agent_id, "key": task["key"], "error": repr(e)})
+            self.hub.call("POST", "/mesh/fail", {"agent_id": self.agent_id, "key": task["key"], "error": repr(e), "lease_token": token})
             return True
-        self.hub.call("POST", "/mesh/submit", {"agent_id": self.agent_id, "key": task["key"], "payload": payload})
+        self.hub.call("POST", "/mesh/submit", {"agent_id": self.agent_id, "key": task["key"], "payload": payload, "lease_token": token})
         self.done += 1
         return True
 

@@ -253,7 +253,7 @@ class Hub:
         now = self.now()
         for t in self.store.query("SELECT key, attempts FROM tasks WHERE status='leased' AND lease_expires < ?", (now,)):
             attempts = t["attempts"] + 1
-            self.store.exec("UPDATE tasks SET status=?, agent=NULL, lease_expires=NULL, attempts=? WHERE key=?",
+            self.store.exec("UPDATE tasks SET status=?, agent=NULL, lease_expires=NULL, lease_token=NULL, attempts=? WHERE key=?",
                             ("failed" if attempts >= MAX_ATTEMPTS else "pending", attempts, t["key"]))
             self.store.add_event("mesh.lease.expired", {"key": t["key"], "attempts": attempts})
 
@@ -272,41 +272,52 @@ class Hub:
         agent = self._agent(aid)
         self.heartbeat(aid)
         self._requeue_expired()
-        for t in self.store.query("SELECT * FROM tasks WHERE status='pending' ORDER BY created, key"):
-            if self._eligible(t, agent):
-                self.store.exec("UPDATE tasks SET status='leased', agent=?, lease_expires=?, attempts=attempts WHERE key=? AND status='pending'",
-                                (aid, self.now() + LEASE_TTL, t["key"]))
-                return {"task": {"key": t["key"], "type": t["type"], "payload": json.loads(t["payload"])},
-                        "lease_ttl": LEASE_TTL, "approved": self.approvals()}
+        now = self.now()
+        t = self.store.claim_task(lambda task: self._eligible(task, agent), aid, LEASE_TTL, now)
+        if t is not None:
+            self.store.add_event("mesh.lease.granted", {"key": t["key"], "agent": aid, "attempt": t["attempts"]})
+            return {
+                "task": {"key": t["key"], "type": t["type"], "payload": json.loads(t["payload"]),
+                         "lease_token": t["lease_token"], "attempt": t["attempts"]},
+                "lease_ttl": LEASE_TTL, "approved": self.approvals(),
+            }
         return {"task": None, "approved": self.approvals(), "active": self.active()}
 
     # ---- results ----
-    def _held_task(self, aid: str, key: str) -> dict:
+    def _held_task(self, aid: str, key: str, lease_token: str) -> dict:
         rows = self.store.query("SELECT * FROM tasks WHERE key=?", (key,))
         if not rows:
             raise MeshError(404, "unknown task")
         t = rows[0]
         if t["status"] != "leased" or t["agent"] != aid:
             raise MeshError(409, f"task is {t['status']}" + (f" and held by {t['agent']}" if t["agent"] else ""))
+        if t.get("lease_token") != lease_token:
+            # The lease this worker thinks it holds has already been reclaimed (expired and re-leased to
+            # someone else, possibly even back to this same agent_id under a new token) -- a stale result
+            # must never be accepted as if it came from the current lease holder. This is the fencing
+            # token's entire purpose: agent_id + status alone cannot tell "my old lease" from "my new one."
+            raise MeshError(409, "stale lease: this task was reclaimed under a different lease token")
         return t
 
-    def submit(self, aid: str, key: str, payload: dict) -> dict:
-        agent, t = self._agent(aid), self._held_task(aid, key)
+    def submit(self, aid: str, key: str, payload: dict, lease_token: str) -> dict:
+        agent, t = self._agent(aid), self._held_task(aid, key, lease_token)
         merged = (merge_scan_payload(self.store, aid, agent["scope"], payload) if t["type"] == "scan"
                   else merge_enrich_payload(self.store, agent["scope"], payload))
-        self.store.exec("UPDATE tasks SET status='done', finished=?, result=? WHERE key=?",
-                        (self.now(), json.dumps({"agent": aid, **merged, "summary": payload.get("summary")}), key))
+        self.store.exec("UPDATE tasks SET status='done', finished=?, result=? WHERE key=? AND lease_token=?",
+                        (self.now(), json.dumps({"agent": aid, **merged, "summary": payload.get("summary")}), key, lease_token))
         self.store.add_event("mesh.task.done", {"key": key, "agent": aid, **merged})
         for cidr in merged.get("new_held_segments", []):
             self.store.add_event("mesh.approval-needed", {"cidr": cidr, "found_by": aid})
         self._after(t)
         return {"ok": True, **merged}
 
-    def fail(self, aid: str, key: str, error: str) -> dict:
-        t = self._held_task(aid, key)
+    def fail(self, aid: str, key: str, error: str, lease_token: str) -> dict:
+        t = self._held_task(aid, key, lease_token)
         attempts = t["attempts"] + 1
-        self.store.exec("UPDATE tasks SET status=?, agent=NULL, lease_expires=NULL, attempts=?, result=? WHERE key=?",
-                        ("failed" if attempts >= MAX_ATTEMPTS else "pending", attempts, json.dumps({"error": error[:300]}), key))
+        self.store.exec(
+            "UPDATE tasks SET status=?, agent=NULL, lease_expires=NULL, lease_token=NULL, attempts=?, result=? "
+            "WHERE key=? AND lease_token=?",
+            ("failed" if attempts >= MAX_ATTEMPTS else "pending", attempts, json.dumps({"error": error[:300]}), key, lease_token))
         self.store.add_event("mesh.task.failed", {"key": key, "agent": aid, "error": error[:200], "attempts": attempts})
         return {"ok": True, "attempts": attempts}
 
