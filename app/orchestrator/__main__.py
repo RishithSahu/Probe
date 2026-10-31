@@ -44,7 +44,10 @@ def _start_probe_and_discover(scope: str, assessment_id: str, *, port: int, prob
 
     data_dir = Path(settings.evidence_dir) / assessment_id / "probe-data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-m", "probe", "run", "--scope", scope, "--no-ui", "--port", str(port),
+    # NOT --no-ui: Probe's own cli.py only starts uvicorn (its web view AND its API) when --no-ui is
+    # absent (probe/cli.py:345) -- passing --no-ui here left no API for ProbeClient.status() to ever poll,
+    # so this always timed out after 180s even though the scan itself completed normally underneath it.
+    cmd = [sys.executable, "-m", "probe", "run", "--scope", scope, "--port", str(port),
           "--data-dir", str(data_dir), "--max-minutes", str(probe_minutes),
           "--authorisations", str(REPO_ROOT / "authorisations.json")]
     logger.info("starting Probe under orchestrator control: %s", " ".join(cmd))
