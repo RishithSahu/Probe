@@ -71,8 +71,12 @@ def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task
         output_data={"selection": explanation},
         status=TaskStatus.RUNNING, started_at=_now(),
     )
+    # allow_reclaim=True only when the candidate's OWN generation already positively decided this is a
+    # retry (next_attempt_count > 1 means generate_candidates saw a prior, finished attempt and a reason
+    # to try again) -- never just because this caller's own snapshot happens not to know about one. See
+    # try_reserve_task's own docstring for the race this prevents.
     with session_scope() as db:
-        token = repository.try_reserve_task(db, task)
+        token = repository.try_reserve_task(db, task, allow_reclaim=objective.next_attempt_count > 1)
         if token:
             repository.log_event(
                 db, assessment_id, AgentId.ORCHESTRATOR.value,
@@ -229,6 +233,18 @@ def run_next_iteration(
                               guard=guard, graph=graph, output_dir=output_dir, explanation=explanation)
 
 
+def _surface_caps() -> dict[str, int]:
+    """Per-surface concurrency limits (item 6): separate resource pools so one surface's own tool cost
+    can't starve the others out of the shared `max_inflight` budget -- a slow Ghidra analysis must not be
+    able to consume every slot that would otherwise go to Web or Network tasks."""
+    from app.core.config import settings
+    return {
+        AgentId.WEB_SECURITY.value: settings.max_concurrent_web_tasks,
+        AgentId.NETWORK_VULNERABILITY_DETECTIVE.value: settings.max_concurrent_network_tasks,
+        AgentId.BINARY_ANALYSIS.value: settings.max_concurrent_binary_tasks,
+    }
+
+
 def run_concurrent_iteration(
     assessment_id: str, *, policy: AssessmentPolicy, output_dir: Path, parent_task_id: str | None = None,
     max_inflight: int = 4,
@@ -240,11 +256,26 @@ def run_concurrent_iteration(
     three independent services are eligible right now, up to `max_inflight` of them are sent to their
     agents at once, not one iteration apart. Each reserved objective gets its OWN fresh `ScopeGuard`
     (cheap to construct, no I/O) rather than sharing one across threads, so concurrent tool-invocation
-    logging from different objectives is never interleaved onto the same guard's audit_log."""
+    logging from different objectives is never interleaved onto the same guard's audit_log.
+
+    Two further resource rules (item 6), enforced while deciding what to reserve, not after:
+      - per-surface caps (`_surface_caps()`): a candidate is skipped (not reserved) if its agent/surface
+        already has as many tasks RUNNING right now (counted from the task ledger, plus whatever this same
+        call has already reserved) as its configured limit allows -- this is a soft, best-effort bound
+        under heavy cross-call concurrency (two overlapping calls could each read the ledger before either
+        one's reservations land), but the hard guarantee -- no candidate is ever run twice -- is completely
+        unaffected by that, since it is still enforced by try_reserve_task's own atomicity, not by this count.
+      - one task per target at a time: this call never reserves two candidates against the SAME asset_id
+        together, so one host is never hit by two agents simultaneously from a single dispatch."""
     with session_scope() as db:
         graph = repository.load_network_graph(db, assessment_id)
-        existing_task_inputs = [dict(t.input_data or {}) for t in repository.list_agent_tasks(db, assessment_id)]
+        all_tasks = repository.list_agent_tasks(db, assessment_id)
+        existing_task_inputs = [dict(t.input_data or {}) for t in all_tasks]
         findings = [repository.finding_to_schema(f) for f in repository.list_findings(db, assessment_id)]
+        running_by_agent: dict[str, int] = {}
+        for t in all_tasks:
+            if t.status == TaskStatus.RUNNING.value:
+                running_by_agent[t.agent_id] = running_by_agent.get(t.agent_id, 0) + 1
 
     if graph is None:
         return [IterationTrace(task_id="", parent_task_id=parent_task_id, agent_id=None, objective=None,
@@ -261,14 +292,23 @@ def run_concurrent_iteration(
 
     explanation_for = {c.candidate_id: {"selected": c.explanation(), "considered": [c.explanation() for c in ranked]}
                        for c in ranked}
+    surface_caps = _surface_caps()
     reserved: list[tuple[Candidate, str, str]] = []
+    reserved_assets: set[str] = set()
     for c in ranked:
         if len(reserved) >= max(1, max_inflight):
             break
+        cap = surface_caps.get(c.agent_id.value)
+        if cap is not None and running_by_agent.get(c.agent_id.value, 0) >= cap:
+            continue  # this surface's pool is already full -- try the next candidate, maybe a different surface
+        if c.asset_id in reserved_assets:
+            continue  # don't send two agents at the same target together in one dispatch
         task_id = _task_id_for(assessment_id, c)
         token = _reserve(assessment_id, c, task_id, parent_task_id, explanation_for[c.candidate_id])
         if token:
             reserved.append((c, task_id, token))
+            running_by_agent[c.agent_id.value] = running_by_agent.get(c.agent_id.value, 0) + 1
+            reserved_assets.add(c.asset_id)
 
     if not reserved:
         return [IterationTrace(

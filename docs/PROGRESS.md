@@ -821,3 +821,66 @@ the authorised `NetworkGraph`.
   `--probe-workers/--web-workers/...` one-command CLI, the remaining
   concurrency tests, and the load/scaling demonstration across
   1/2/4/8+ workers).
+
+- **Entry 12** — Items 5 (multi-worker pools) and 6 (resource limits) of
+  the concurrency request, plus a real, user-asked-for completeness check
+  ("ghidra should not need to be downloaded each time, ship it with the
+  main codebase") that was deliberately NOT done after weighing the
+  tradeoff with the user: no Ghidra install exists on this machine right
+  now (checked PATH, env vars, common install dirs -- nothing), and
+  committing a ~1-1.5GB install into git permanently (GitHub blocks
+  single files over 100MB without Git LFS) is a real, hard-to-reverse
+  cost; asked, and the user said to skip it for now rather than vendor it.
+
+  **Item 6 -- per-surface and per-target concurrency limits**: added
+  `max_concurrent_web_tasks` / `max_concurrent_network_tasks` /
+  `max_concurrent_binary_tasks` (`app/core/config.py`, defaults 3/3/2) --
+  separate resource pools so one surface's own tool cost (Ghidra is the
+  heaviest) can't starve the others out of the shared `max_inflight`
+  budget. `run_concurrent_iteration`'s reservation loop now counts
+  currently-RUNNING tasks per agent_id from the task ledger before
+  deciding what to reserve, skipping a candidate whose surface is
+  already at its cap (soft/best-effort under heavy cross-call
+  concurrency -- documented honestly -- but the "never run the same
+  candidate twice" guarantee is completely unaffected, since that is
+  still try_reserve_task's own atomicity, not this count). Also added
+  one-task-per-target-at-a-time: two candidates on the SAME asset_id are
+  never both reserved together in one dispatch call.
+
+  **A second real bug found and fixed while testing this, not assumed
+  away**: proving the per-surface cap with a fast stub surfaced an
+  actual race in Entry 11's own reservation design. Candidate
+  generation takes a snapshot of task history at call-start; with a
+  fast enough stub, one concurrent call could fully reserve, run, AND
+  complete a candidate before a SECOND concurrent call -- reading its
+  own, now-stale snapshot -- reached that same candidate, still
+  believing it "unvisited." Because `try_reserve_task` would reclaim
+  ANY non-RUNNING task_id, the second call's stale belief let it
+  legitimately re-reserve and **re-execute** a candidate that had
+  correctly finished moments earlier, under zero new evidence --
+  reproduced directly by `test_concurrent_dispatch_never_runs_the_same_
+  candidate_twice` going from 4 to 6 executions once the per-surface
+  cap change made the timing more likely to trigger it. Fixed by adding
+  `allow_reclaim` to `try_reserve_task` (default True, so direct callers/
+  tests are unaffected): `autonomous_loop._reserve()` now only passes
+  `allow_reclaim=True` when the candidate's own `next_attempt_count > 1`
+  -- i.e., when `generate_candidates` itself already saw a prior,
+  finished attempt and positively decided a retry is warranted, never
+  merely because a caller's snapshot happens not to know about one.
+  Re-run 4x after the fix, no recurrence.
+
+  New/updated tests (`tests/test_concurrent_scheduler.py`):
+  per-surface cap correctly limits a same-surface batch below
+  `max_inflight`, and a later call picks up the rest once the capped
+  tasks finish; two services on the same asset are never reserved
+  together, and a later call picks up the second once the first
+  finishes. Full suite: **496 passed, 4 skipped**.
+
+  **Still not done**: item 5's remaining piece (separate Probe-side
+  worker PROCESSES actually dispatching through `probe/mesh/worker.py`
+  at scale -- today's per-surface caps govern the `app/` orchestrator's
+  own in-process thread pool, not distinct OS-level worker processes),
+  subprocess cancellation/process-group kill for Katana/nmap (item 7's
+  remaining half), PostgreSQL verified end-to-end against a real server
+  (item 8), the generic evidence-graph model, the multi-worker CLI, the
+  remaining concurrency tests, and the load/scaling demonstration.

@@ -133,7 +133,7 @@ def upsert_agent_task(db: Session, task: AgentTask) -> None:
     db.flush()
 
 
-def try_reserve_task(db: Session, task: AgentTask) -> str | None:
+def try_reserve_task(db: Session, task: AgentTask, *, allow_reclaim: bool = True) -> str | None:
     """Atomically claim `task.task_id` for THIS caller, so a concurrent scheduler dispatching several
     candidates at once can never run the same one twice. `task.task_id` is a deterministic fingerprint of
     the unit of work (assessment + agent/surface + target/service -- see
@@ -143,14 +143,27 @@ def try_reserve_task(db: Session, task: AgentTask) -> str | None:
     may create a legitimate new follow-up task"). So "already exists" alone must not permanently block it --
     only "already RUNNING" may.
 
+    `allow_reclaim` guards exactly that distinction, and callers must get it right: pass True only when
+    the candidate's OWN freshly-read evidence (not a stale snapshot) positively justifies a new attempt
+    (app.orchestrator.scheduler's `next_attempt_count > 1`, i.e. the generator itself already saw a prior,
+    finished attempt and decided a retry is warranted). A caller reserving what IT believes is a brand-new,
+    never-attempted candidate must pass False. Without this, a real race is possible: candidate generation
+    takes a snapshot of task history at call-start; if a FAST concurrent call fully reserves, runs, and
+    completes that same candidate before this call reaches its own reservation attempt, this call's stale
+    snapshot still shows it as "unvisited" (next_attempt_count == 1) -- with allow_reclaim always true,
+    that stale belief would let this call legitimately "reclaim" and re-execute a task that was correctly
+    finished moments ago, under no new evidence at all. allow_reclaim=False for that case makes the
+    INSERT's failure final: the row already existing, in ANY status, is enough to refuse.
+
     Two atomic paths, neither of them a SELECT-then-write:
       1. A brand-new task_id: a plain INSERT, which only one of several racing callers can ever have
          succeed (the primary key is what the database itself serialises on, across sessions/connections --
          see probe/store.py's claim_task for the same pattern against SQLite's own write lock).
       2. A task_id that already exists (from a prior, now-finished attempt, or from another caller
-         currently racing this same reservation): an UPDATE ... WHERE status != 'running', whose rowcount
-         is checked exactly like Probe's Hub.lease() does -- it reclaims a terminal task for a new attempt,
-         but a task some other caller already has RUNNING matches no row and rowcount is 0.
+         currently racing this same reservation) AND `allow_reclaim` is True: an
+         UPDATE ... WHERE status != 'running', whose rowcount is checked exactly like Probe's
+         Hub.lease() does -- it reclaims a terminal task for a new attempt, but a task some other caller
+         already has RUNNING matches no row and rowcount is 0.
 
     Every successful claim mints a fresh `reservation_token` (returned to the caller, who must present it
     back to `try_complete_task` -- see that function's docstring for why: `run_concurrently()`'s timeout
@@ -158,8 +171,8 @@ def try_reserve_task(db: Session, task: AgentTask) -> str | None:
     whatever a retry, holding a NEWER token, already wrote for the same task_id).
 
     Returns the new reservation_token iff THIS call now owns the task (the caller must execute it and later
-    present this token back); None means it is currently running under somebody else's reservation (the
-    caller must skip it, not retry)."""
+    present this token back); None means it already exists and either is currently RUNNING, or
+    `allow_reclaim` was False (the caller must skip it, not retry)."""
     token = secrets.token_hex(12)
     record = AgentTaskRecord(
         task_id=task.task_id, assessment_id=task.assessment_id, agent_id=task.agent_id.value,
@@ -174,6 +187,8 @@ def try_reserve_task(db: Session, task: AgentTask) -> str | None:
         return token
     except IntegrityError:
         db.rollback()
+        if not allow_reclaim:
+            return None
         result = db.execute(
             update(AgentTaskRecord)
             .where(AgentTaskRecord.task_id == task.task_id, AgentTaskRecord.status != TaskStatus.RUNNING.value)
