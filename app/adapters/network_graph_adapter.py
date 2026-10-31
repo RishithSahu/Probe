@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import abc
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.core.config import settings
 from app.core.exceptions import GraphValidationError
@@ -127,12 +128,30 @@ class ProbeAPISource(NetworkGraphSource):
                 # a fresh scan can take minutes; an assessment shouldn't
                 # silently block on one unless explicitly asked to.
                 client.ensure_scan(max_age_s=self.max_age_s)
+            before = client.status()
             hosts = client.hosts()
             segments = client.segments()
+            metadata = {}
+            limitations = []
+            for name in ("state", "report"):
+                try:
+                    metadata[name] = getattr(client, name)()
+                except ProbeError:
+                    limitations.append(f"Probe {name} metadata unavailable")
+            after = client.status()
+            before_scan = before.get("last_scan")
+            after_scan = after.get("last_scan")
+            if before_scan != after_scan or (
+                isinstance(after_scan, dict) and after_scan.get("status") in {"running", "queued", "starting"}
+            ):
+                raise GraphValidationError("Probe scan changed during inventory import; obtain a stable snapshot before proceeding")
+            if not after_scan:
+                limitations.append("No completed scan identity or freshness was supplied by Probe")
         except ProbeError as exc:
             raise GraphValidationError(f"could not read the network inventory from Probe at {self.base_url}: {exc}") from exc
 
-        return {"_probe_hosts": hosts, "_probe_segments": segments}
+        return {"_probe_hosts": hosts, "_probe_segments": segments,
+                "_probe_metadata": metadata, "_probe_status": after, "_import_limitations": limitations}
 
 
 def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -356,7 +375,13 @@ def load_network_graph(
     """
     raw = source.load_raw()
     normaliser = normaliser or normalise
-    return normaliser(raw, raw_source_ref=raw_source_ref, **normaliser_kwargs)
+    graph = normaliser(raw, raw_source_ref=raw_source_ref, **normaliser_kwargs)
+    if isinstance(source, ProbeAPISource):
+        from app.adapters.discovery_snapshot import save_snapshot
+
+        reference = save_snapshot(raw, source=source.base_url, scope_id=graph.scope_id)
+        graph = graph.model_copy(update={"raw_source_ref": str(reference)})
+    return graph
 
 
 def extract_http_services(graph: NetworkGraph) -> list[tuple[NetworkGraphAssetRecord, NetworkGraphServiceRecord]]:

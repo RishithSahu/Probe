@@ -36,4 +36,5 @@ reportlab==5.1.0
 # `pytest`/`ruff` can be run inside the container if preferred over host)
 pytest==8.4.2
 pytest-cov==7.0.0
+pypdf==6.15.0
 ruff==0.17.1

@@ -1,0 +1,700 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-10-31T19:27:21.006298+00:00",
+  "assessment_id": "OFFLINE-REPORT-QA",
+  "scope_id": "SYNTHETIC-LAYOUT-ONLY",
+  "executive_summary": "*** DATA INTEGRITY WARNING ***\nThis report contains SYNTHETIC/FIXTURE findings, not exclusively real scan results. The following tool(s) were unavailable during this run and their output was substituted with documented placeholder data for continuity: httpx. Findings attributable to these tools must NOT be treated as real assessment results. See \"data_integrity\" in the JSON report and each finding's evidence/tool_executions for which tool produced it. Re-run this assessment with the real tool(s) installed and reachable before relying on this report.\n\nThis report presents the results of an authorised security assessment (assessment ID OFFLINE-REPORT-QA, scope SYNTHETIC-LAYOUT-ONLY) conducted against 3 network asset(s).\n\nAgent results were coordinated by the Orchestrator. Required-surface coverage is incomplete; discovery completeness is incomplete. See Coverage and Completion for the status of each surface. 6 finding(s) were confirmed and 0 remain suspected pending further verification.\n\nSeverity breakdown: 6 low.\n\nThe following assessment activities did not complete and are reflected as limitations in this report: Required surfaces incomplete: network, web, binary, Discovery completeness is incomplete, External Network Vulnerability Agent: no results ingested for this run.",
+  "authorised_scope": {
+    "schema_version": "1.0.0",
+    "allow_network_discovery": false,
+    "allow_network_service_assessment": false,
+    "allow_ftp_anonymous_check": false,
+    "allow_web_crawling": false,
+    "allow_passive_web_analysis": false,
+    "allow_active_web_verification": false,
+    "allow_binary_analysis": false,
+    "allow_content_discovery": false,
+    "max_content_discovery_requests": 40,
+    "content_discovery_rate_per_second": 2.0,
+    "allow_single_credential_verification": false,
+    "approved_web_origins": [],
+    "approved_asset_ids": [],
+    "max_crawl_depth": 2,
+    "max_crawl_requests_per_second": 2.0,
+    "dry_run": true
+  },
+  "methodology": "PTES mapping classifies recorded activities and findings. A phase with no activity is not evidence that its actions occurred. Failed attempts, skipped actions, inferred legacy operation names and unresolved mappings are reported separately.\n\nThe recorded policy did not enable web crawling and did not enable active web verification. Permission settings describe allowed work; execution records and supporting artifacts establish what actually happened. Tool-specific limitations and fixture use are listed in this report.\n\nInventory, weakness observations and access transitions have different meanings. Discovery convergence reflects the available evidence and completed observation methods; it does not measure recall against every device in the environment. No organiser manifest is required to run discovery. Independent ground truth can optionally measure recall after a run.",
+  "network_graph_overview": {
+    "schema_version": "1.0.0",
+    "scope_id": "SYNTHETIC-LAYOUT-ONLY",
+    "generated_by": "offline-layout-fixture",
+    "assets": [
+      {
+        "asset_id": "HOST-LAYOUT-001",
+        "ip": "10.20.30.1",
+        "hostname": "offline-layout-only.example",
+        "asset_type": "host",
+        "services": [
+          {
+            "service_id": "HOST-LAYOUT-001:80/tcp",
+            "asset_id": "HOST-LAYOUT-001",
+            "port": 80,
+            "protocol": "tcp",
+            "service_name": "http",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          },
+          {
+            "service_id": "HOST-LAYOUT-001:443/tcp",
+            "asset_id": "HOST-LAYOUT-001",
+            "port": 443,
+            "protocol": "tcp",
+            "service_name": "https",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          },
+          {
+            "service_id": "HOST-LAYOUT-001:8080/tcp",
+            "asset_id": "HOST-LAYOUT-001",
+            "port": 8080,
+            "protocol": "tcp",
+            "service_name": "http-alt",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          }
+        ],
+        "held": false,
+        "verdict": "SYNTHETIC_LAYOUT_OBSERVATION"
+      },
+      {
+        "asset_id": "HOST-LAYOUT-002",
+        "ip": "10.20.30.2",
+        "hostname": "offline-layout-only.example",
+        "asset_type": "host",
+        "services": [
+          {
+            "service_id": "HOST-LAYOUT-002:80/tcp",
+            "asset_id": "HOST-LAYOUT-002",
+            "port": 80,
+            "protocol": "tcp",
+            "service_name": "http",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          },
+          {
+            "service_id": "HOST-LAYOUT-002:443/tcp",
+            "asset_id": "HOST-LAYOUT-002",
+            "port": 443,
+            "protocol": "tcp",
+            "service_name": "https",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          },
+          {
+            "service_id": "HOST-LAYOUT-002:8080/tcp",
+            "asset_id": "HOST-LAYOUT-002",
+            "port": 8080,
+            "protocol": "tcp",
+            "service_name": "http-alt",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          }
+        ],
+        "held": false,
+        "verdict": "SYNTHETIC_LAYOUT_OBSERVATION"
+      },
+      {
+        "asset_id": "HOST-LAYOUT-003",
+        "ip": "10.20.30.3",
+        "hostname": "offline-layout-only.example",
+        "asset_type": "host",
+        "services": [
+          {
+            "service_id": "HOST-LAYOUT-003:80/tcp",
+            "asset_id": "HOST-LAYOUT-003",
+            "port": 80,
+            "protocol": "tcp",
+            "service_name": "http",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          },
+          {
+            "service_id": "HOST-LAYOUT-003:443/tcp",
+            "asset_id": "HOST-LAYOUT-003",
+            "port": 443,
+            "protocol": "tcp",
+            "service_name": "https",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          },
+          {
+            "service_id": "HOST-LAYOUT-003:8080/tcp",
+            "asset_id": "HOST-LAYOUT-003",
+            "port": 8080,
+            "protocol": "tcp",
+            "service_name": "http-alt",
+            "version": "fixture",
+            "product": "Synthetic layout product",
+            "banner": null
+          }
+        ],
+        "held": true,
+        "verdict": "SYNTHETIC_LAYOUT_OBSERVATION"
+      }
+    ],
+    "edges": [
+      {
+        "source": "HOST-LAYOUT-001",
+        "target": "HOST-LAYOUT-002",
+        "relation": "CONNECTS_TO"
+      }
+    ],
+    "raw_source_ref": null
+  },
+  "findings_by_surface": {
+    "network": [],
+    "web": [
+      {
+        "schema_version": "1.0.0",
+        "finding_id": "WEB-873d5073bb",
+        "assessment_id": "OFFLINE-REPORT-QA",
+        "agent_id": "web_security_agent",
+        "surface": "web",
+        "asset_id": "HOST-LAYOUT-001",
+        "binary_id": null,
+        "title": "Missing security headers: content-security-policy, strict-transport-security, x-content-type-options, x-frame-options <literal markup> & visible evidence",
+        "description": "The response did not include the following recommended security headers: content-security-policy, strict-transport-security, x-content-type-options, x-frame-options.\n\n[Verification note] auto-confirmed: deterministic header/cookie check",
+        "severity": "low",
+        "confidence": "high",
+        "status": "confirmed",
+        "evidence_refs": [
+          "EVIDENCE-8d9ac07ca1"
+        ],
+        "remediation": "Configure the web server/application to emit the missing headers.",
+        "ptes_phase": "vulnerability_analysis",
+        "detection_method": "httpx_header_analysis",
+        "created_at": "2026-10-31T19:23:06.999515Z",
+        "affected_url": "http://layout.example/",
+        "endpoint": null,
+        "parameter": null,
+        "function_name": null,
+        "function_address": null,
+        "service_id": null,
+        "verification_required": false
+      },
+      {
+        "schema_version": "1.0.0",
+        "finding_id": "WEB-0cf4364252",
+        "assessment_id": "OFFLINE-REPORT-QA",
+        "agent_id": "web_security_agent",
+        "surface": "web",
+        "asset_id": "HOST-LAYOUT-001",
+        "binary_id": null,
+        "title": "Insecure cookie attributes on 'sample-session'",
+        "description": "Cookie 'sample-session' is missing Secure flag.\n\n[Verification note] auto-confirmed: deterministic header/cookie check",
+        "severity": "low",
+        "confidence": "high",
+        "status": "confirmed",
+        "evidence_refs": [
+          "EVIDENCE-70cd75a9bc"
+        ],
+        "remediation": "Set Secure and HttpOnly on session/auth cookies.",
+        "ptes_phase": "vulnerability_analysis",
+        "detection_method": "httpx_cookie_analysis",
+        "created_at": "2026-10-31T19:23:06.999515Z",
+        "affected_url": "http://layout.example/",
+        "endpoint": null,
+        "parameter": null,
+        "function_name": null,
+        "function_address": null,
+        "service_id": null,
+        "verification_required": false
+      },
+      {
+        "schema_version": "1.0.0",
+        "finding_id": "WEB-0d903e8976",
+        "assessment_id": "OFFLINE-REPORT-QA",
+        "agent_id": "web_security_agent",
+        "surface": "web",
+        "asset_id": "HOST-LAYOUT-002",
+        "binary_id": null,
+        "title": "Missing security headers: content-security-policy, strict-transport-security, x-content-type-options, x-frame-options",
+        "description": "The response did not include the following recommended security headers: content-security-policy, strict-transport-security, x-content-type-options, x-frame-options.\n\n[Verification note] auto-confirmed: deterministic header/cookie check",
+        "severity": "low",
+        "confidence": "high",
+        "status": "confirmed",
+        "evidence_refs": [
+          "EVIDENCE-0cc16f570f"
+        ],
+        "remediation": "Configure the web server/application to emit the missing headers.",
+        "ptes_phase": "vulnerability_analysis",
+        "detection_method": "httpx_header_analysis",
+        "created_at": "2026-10-31T19:23:06.999515Z",
+        "affected_url": "http://layout.example/",
+        "endpoint": null,
+        "parameter": null,
+        "function_name": null,
+        "function_address": null,
+        "service_id": null,
+        "verification_required": false
+      },
+      {
+        "schema_version": "1.0.0",
+        "finding_id": "WEB-1abba936ee",
+        "assessment_id": "OFFLINE-REPORT-QA",
+        "agent_id": "web_security_agent",
+        "surface": "web",
+        "asset_id": "HOST-LAYOUT-002",
+        "binary_id": null,
+        "title": "Insecure cookie attributes on 'sample-session'",
+        "description": "Cookie 'sample-session' is missing Secure flag.\n\n[Verification note] auto-confirmed: deterministic header/cookie check",
+        "severity": "low",
+        "confidence": "high",
+        "status": "confirmed",
+        "evidence_refs": [
+          "EVIDENCE-3e995f3825"
+        ],
+        "remediation": "Set Secure and HttpOnly on session/auth cookies.",
+        "ptes_phase": "vulnerability_analysis",
+        "detection_method": "httpx_cookie_analysis",
+        "created_at": "2026-10-31T19:23:06.999515Z",
+        "affected_url": "http://layout.example/",
+        "endpoint": null,
+        "parameter": null,
+        "function_name": null,
+        "function_address": null,
+        "service_id": null,
+        "verification_required": false
+      },
+      {
+        "schema_version": "1.0.0",
+        "finding_id": "WEB-dfd405e5dc",
+        "assessment_id": "OFFLINE-REPORT-QA",
+        "agent_id": "web_security_agent",
+        "surface": "web",
+        "asset_id": "HOST-LAYOUT-003",
+        "binary_id": null,
+        "title": "Missing security headers: content-security-policy, strict-transport-security, x-content-type-options, x-frame-options",
+        "description": "The response did not include the following recommended security headers: content-security-policy, strict-transport-security, x-content-type-options, x-frame-options.\n\n[Verification note] auto-confirmed: deterministic header/cookie check",
+        "severity": "low",
+        "confidence": "high",
+        "status": "confirmed",
+        "evidence_refs": [
+          "EVIDENCE-32d7a50265"
+        ],
+        "remediation": "Configure the web server/application to emit the missing headers.",
+        "ptes_phase": "vulnerability_analysis",
+        "detection_method": "httpx_header_analysis",
+        "created_at": "2026-10-31T19:23:06.999515Z",
+        "affected_url": "http://layout.example/",
+        "endpoint": null,
+        "parameter": null,
+        "function_name": null,
+        "function_address": null,
+        "service_id": null,
+        "verification_required": false
+      },
+      {
+        "schema_version": "1.0.0",
+        "finding_id": "WEB-4fee9460e2",
+        "assessment_id": "OFFLINE-REPORT-QA",
+        "agent_id": "web_security_agent",
+        "surface": "web",
+        "asset_id": "HOST-LAYOUT-003",
+        "binary_id": null,
+        "title": "Insecure cookie attributes on 'sample-session'",
+        "description": "Cookie 'sample-session' is missing Secure flag.\n\n[Verification note] auto-confirmed: deterministic header/cookie check",
+        "severity": "low",
+        "confidence": "high",
+        "status": "confirmed",
+        "evidence_refs": [
+          "EVIDENCE-54ae74aa45"
+        ],
+        "remediation": "Set Secure and HttpOnly on session/auth cookies.",
+        "ptes_phase": "vulnerability_analysis",
+        "detection_method": "httpx_cookie_analysis",
+        "created_at": "2026-10-31T19:23:06.999515Z",
+        "affected_url": "http://layout.example/",
+        "endpoint": null,
+        "parameter": null,
+        "function_name": null,
+        "function_address": null,
+        "service_id": null,
+        "verification_required": false
+      }
+    ],
+    "binary": []
+  },
+  "findings_summary": {
+    "total": 6,
+    "by_status": {
+      "confirmed": 6
+    },
+    "by_severity": {
+      "low": 6
+    }
+  },
+  "evidence": [
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "EVIDENCE-8d9ac07ca1",
+      "finding_id": "WEB-873d5073bb",
+      "evidence_type": "http_response",
+      "source_tool": "httpx",
+      "storage_path": null,
+      "description": "Response headers observed for http://layout.example/",
+      "timestamp": "2026-10-31T19:23:06.999515Z",
+      "raw_data": {
+        "headers": {
+          "server": "offline layout fixture"
+        },
+        "missing": [
+          "content-security-policy",
+          "strict-transport-security",
+          "x-content-type-options",
+          "x-frame-options"
+        ]
+      }
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "EVIDENCE-70cd75a9bc",
+      "finding_id": "WEB-0cf4364252",
+      "evidence_type": "http_response",
+      "source_tool": "httpx",
+      "storage_path": null,
+      "description": "Cookie 'sample-session' observed on http://layout.example/",
+      "timestamp": "2026-10-31T19:23:06.999515Z",
+      "raw_data": {
+        "name": "sample-session",
+        "secure": false,
+        "httponly": true
+      }
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "EVIDENCE-0cc16f570f",
+      "finding_id": "WEB-0d903e8976",
+      "evidence_type": "http_response",
+      "source_tool": "httpx",
+      "storage_path": null,
+      "description": "Response headers observed for http://layout.example/",
+      "timestamp": "2026-10-31T19:23:06.999515Z",
+      "raw_data": {
+        "headers": {
+          "server": "offline layout fixture"
+        },
+        "missing": [
+          "content-security-policy",
+          "strict-transport-security",
+          "x-content-type-options",
+          "x-frame-options"
+        ]
+      }
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "EVIDENCE-3e995f3825",
+      "finding_id": "WEB-1abba936ee",
+      "evidence_type": "http_response",
+      "source_tool": "httpx",
+      "storage_path": null,
+      "description": "Cookie 'sample-session' observed on http://layout.example/",
+      "timestamp": "2026-10-31T19:23:06.999515Z",
+      "raw_data": {
+        "name": "sample-session",
+        "secure": false,
+        "httponly": true
+      }
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "EVIDENCE-32d7a50265",
+      "finding_id": "WEB-dfd405e5dc",
+      "evidence_type": "http_response",
+      "source_tool": "httpx",
+      "storage_path": null,
+      "description": "Response headers observed for http://layout.example/",
+      "timestamp": "2026-10-31T19:23:06.999515Z",
+      "raw_data": {
+        "headers": {
+          "server": "offline layout fixture"
+        },
+        "missing": [
+          "content-security-policy",
+          "strict-transport-security",
+          "x-content-type-options",
+          "x-frame-options"
+        ]
+      }
+    },
+    {
+      "schema_version": "1.0.0",
+      "evidence_id": "EVIDENCE-54ae74aa45",
+      "finding_id": "WEB-4fee9460e2",
+      "evidence_type": "http_response",
+      "source_tool": "httpx",
+      "storage_path": null,
+      "description": "Cookie 'sample-session' observed on http://layout.example/",
+      "timestamp": "2026-10-31T19:23:06.999515Z",
+      "raw_data": {
+        "name": "sample-session",
+        "secure": false,
+        "httponly": true
+      }
+    }
+  ],
+  "evidence_validation": {},
+  "attack_paths": [
+    {
+      "source": "HOST-LAYOUT-001",
+      "target": "HOST-LAYOUT-001:80/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001:80/tcp",
+      "target": "HOST-LAYOUT-001",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001",
+      "target": "HOST-LAYOUT-001:443/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001:443/tcp",
+      "target": "HOST-LAYOUT-001",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001",
+      "target": "HOST-LAYOUT-001:8080/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001:8080/tcp",
+      "target": "HOST-LAYOUT-001",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-002",
+      "target": "HOST-LAYOUT-002:80/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-002:80/tcp",
+      "target": "HOST-LAYOUT-002",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-002",
+      "target": "HOST-LAYOUT-002:443/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-002:443/tcp",
+      "target": "HOST-LAYOUT-002",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-002",
+      "target": "HOST-LAYOUT-002:8080/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-002:8080/tcp",
+      "target": "HOST-LAYOUT-002",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-003",
+      "target": "HOST-LAYOUT-003:80/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-003:80/tcp",
+      "target": "HOST-LAYOUT-003",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-003",
+      "target": "HOST-LAYOUT-003:443/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-003:443/tcp",
+      "target": "HOST-LAYOUT-003",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-003",
+      "target": "HOST-LAYOUT-003:8080/tcp",
+      "relation": "HOSTS",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-003:8080/tcp",
+      "target": "HOST-LAYOUT-003",
+      "relation": "EXPOSES",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001",
+      "target": "HOST-LAYOUT-002",
+      "relation": "CONNECTS_TO",
+      "evidence_backed": false,
+      "finding_id": null
+    },
+    {
+      "source": "HOST-LAYOUT-001",
+      "target": "finding:WEB-873d5073bb",
+      "relation": "AFFECTED_BY",
+      "evidence_backed": true,
+      "finding_id": "WEB-873d5073bb"
+    },
+    {
+      "source": "HOST-LAYOUT-001",
+      "target": "finding:WEB-0cf4364252",
+      "relation": "AFFECTED_BY",
+      "evidence_backed": true,
+      "finding_id": "WEB-0cf4364252"
+    },
+    {
+      "source": "HOST-LAYOUT-002",
+      "target": "finding:WEB-0d903e8976",
+      "relation": "AFFECTED_BY",
+      "evidence_backed": true,
+      "finding_id": "WEB-0d903e8976"
+    },
+    {
+      "source": "HOST-LAYOUT-002",
+      "target": "finding:WEB-1abba936ee",
+      "relation": "AFFECTED_BY",
+      "evidence_backed": true,
+      "finding_id": "WEB-1abba936ee"
+    },
+    {
+      "source": "HOST-LAYOUT-003",
+      "target": "finding:WEB-dfd405e5dc",
+      "relation": "AFFECTED_BY",
+      "evidence_backed": true,
+      "finding_id": "WEB-dfd405e5dc"
+    },
+    {
+      "source": "HOST-LAYOUT-003",
+      "target": "finding:WEB-4fee9460e2",
+      "relation": "AFFECTED_BY",
+      "evidence_backed": true,
+      "finding_id": "WEB-4fee9460e2"
+    }
+  ],
+  "ptes_mapping": {
+    "phase_activity_counts": {
+      "intelligence_gathering": 1,
+      "reporting": 1
+    },
+    "phase_finding_counts": {
+      "vulnerability_analysis": 6
+    },
+    "unmapped_activities": [],
+    "inferred_operations": [
+      [
+        "httpx",
+        "fingerprint"
+      ]
+    ],
+    "skipped_activities": [],
+    "failed_activity_counts": {}
+  },
+  "incomplete_tasks_and_limitations": [
+    "Required surfaces incomplete: network, web, binary",
+    "Discovery completeness is incomplete",
+    "External Network Vulnerability Agent: no results ingested for this run"
+  ],
+  "agent_execution_summary": {
+    "web_agent_result": {
+      "status": "completed",
+      "errors": [],
+      "tool_execution_count": 1
+    }
+  },
+  "assessment_coverage": {
+    "execution_status": "completed",
+    "required_surfaces": [
+      "network",
+      "web",
+      "binary"
+    ],
+    "surfaces": {
+      "network": {
+        "status": "not_observed",
+        "required": true
+      },
+      "web": {
+        "status": "synthetic",
+        "required": true
+      },
+      "binary": {
+        "status": "not_observed",
+        "required": true
+      }
+    },
+    "missing_or_incomplete_surfaces": [
+      "network",
+      "web",
+      "binary"
+    ],
+    "discovery_status": "incomplete",
+    "evidence_incomplete": false,
+    "overall": "incomplete"
+  },
+  "discovery_provenance": {},
+  "data_integrity": {
+    "fixture_tools_used": [
+      "httpx"
+    ],
+    "contains_synthetic_data": true
+  }
+}

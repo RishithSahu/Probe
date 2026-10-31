@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.core.config import settings
 from app.core.exceptions import ToolExecutionError
@@ -44,6 +48,39 @@ class CrawlResult:
 
 def _katana_available() -> bool:
     return shutil.which(settings.katana_binary) is not None
+
+
+def _origin_scope_regex(base_url: str) -> str:
+    """Restrict this crawl to its one authorised origin, including port.
+
+    Only RE2-compatible constructs are used, since Katana uses Go regexps.
+    Host suffixes, userinfo, alternate schemes and ports cannot match.
+    """
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ToolExecutionError("Crawler requires an HTTP(S) origin without URL credentials")
+    host = parsed.hostname.encode("idna").decode("ascii")
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme == "https" else 80
+    port = parsed.port if parsed.port is not None else default_port
+    if port == 0:
+        raise ToolExecutionError("Crawler requires a non-zero TCP port")
+    port_pattern = f"(:{port})?" if port == default_port else f":{port}"
+    return rf"(?i)^{re.escape(parsed.scheme)}://{re.escape(host)}{port_pattern}(/|\?|#|$)"
+
+
+def _check_scope_capabilities() -> None:
+    """Fail before crawling if the installed tool cannot enforce these flags."""
+    try:
+        result = subprocess.run(
+            [settings.katana_binary, "-h"], capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ToolExecutionError("Could not verify Katana scope and redirect controls") from exc
+    help_text = result.stdout + result.stderr
+    if result.returncode != 0 or not all(flag in help_text for flag in ("-crawl-scope", "-disable-redirects")):
+        raise ToolExecutionError("Installed Katana does not advertise required scope and redirect controls; crawl not started")
 
 
 def _parse_katana_jsonl(output: str) -> list[DiscoveredEndpoint]:
@@ -113,8 +150,12 @@ def crawl(
             return CrawlResult(endpoints=_synthetic_endpoints(base_url), used_fixture=True)
         raise ToolExecutionError(f"katana binary {settings.katana_binary!r} not found on PATH and fixtures disabled")
 
+    origin_scope = _origin_scope_regex(base_url)
+    _check_scope_capabilities()
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_file = output_dir / f"katana_{asset_id}.jsonl"
+    asset_key = sha256(asset_id.encode("utf-8")).hexdigest()[:16]
+    out_file = output_dir / f"katana_{asset_key}_{uuid.uuid4().hex[:8]}.jsonl"
 
     # Fixed, validated argument list — never a shell string. `-d` bounds crawl
     # depth, `-rl` bounds request rate, `-silent`/`-jsonl` give us structured,
@@ -126,6 +167,10 @@ def crawl(
         "-u", base_url,
         "-d", str(depth),
         "-rl", str(max(1, int(rate_per_second))),
+        "-cs", origin_scope,
+        "-dr",  # redirects must not escape the origin before output filtering
+        "-c", "1",
+        "-p", "1",
         "-jc",  # include form/query-param-bearing endpoints
         "-silent",
         "-jsonl",
@@ -134,13 +179,12 @@ def crawl(
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=max(30.0, depth * 30.0), check=False,
         )
-    except subprocess.TimeoutExpired as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise ToolExecutionError(f"katana timed out crawling {base_url}") from exc
 
-    if proc.returncode != 0 and not proc.stdout:
-        raise ToolExecutionError(f"katana exited {proc.returncode} crawling {base_url}: {proc.stderr[:500]}")
-
     out_file.write_text(proc.stdout, encoding="utf-8")
+    if proc.returncode != 0:
+        raise ToolExecutionError(f"katana exited {proc.returncode}; partial output retained at {out_file}")
     endpoints = _parse_katana_jsonl(proc.stdout)
 
     # Second line of defence: drop (and log) any endpoint Katana returned that

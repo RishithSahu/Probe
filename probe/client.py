@@ -42,6 +42,8 @@ class ProbeClient:
 
     # ---- inventory ----
     def status(self): return self._req("GET", "/api/status")
+    def state(self): return self._req("GET", "/api/state")
+    def report(self): return self._req("GET", "/api/report")
     def hosts(self, **filters): return self._req("GET", "/api/hosts", **filters)
     def host(self, ip: str): return self._req("GET", f"/api/hosts/{ip}")
     def services(self, **filters): return self._req("GET", "/api/services", **filters)

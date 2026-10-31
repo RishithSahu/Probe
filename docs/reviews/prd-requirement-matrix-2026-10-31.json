@@ -1,0 +1,148 @@
+{
+  "reviewed_at_ist": "2026-10-31T23:52:17+05:30",
+  "source_pdf": "C:\\Users\\rishi\\Rishith\\Ultra Probe\\PRD_Autonomous_Pentest_Engine.docx.pdf",
+  "source_sha256": "11d8ff9036c3b86b0d826e03138ec60ea039e8b56fd4cd04018a1d079162a245",
+  "source_pages": 4,
+  "basis": "The attached four-page PRD; not the separate larger master specification described in older audit notes.",
+  "requirements": [
+    {
+      "id": "FR-1",
+      "requirement": "Find live hosts, open ports and services in scope",
+      "page": 2,
+      "status": "implemented-and-live-demonstrated; coverage qualification unmeasured",
+      "evidence": [
+        "probe/engine.py",
+        "probe-data/roamer-hidden-verified-20261031/report.json"
+      ],
+      "gap": "Bounded discovery remains incomplete; planted-host/service denominator is unavailable.",
+      "acceptance": "Run the selected tier against organiser ground truth; measure host/service recall and scope violations."
+    },
+    {
+      "id": "FR-2",
+      "requirement": "Crawl web apps, list endpoints and flag common issues",
+      "page": 2,
+      "status": "partially live-demonstrated",
+      "evidence": [
+        "app/agents/web_security/agent.py",
+        "app/agents/web_security/crawler.py",
+        "evidence/reports/ASSESSMENT-B027905184_report.json"
+      ],
+      "gap": "Reviewed consolidated run contains Katana/ZAP fixtures; independent web-capability dispatch and current scope-policy consistency need validation.",
+      "acceptance": "Produce real endpoints and reproducible findings with fixtures disabled; crawl-only policy must dispatch correctly."
+    },
+    {
+      "id": "FR-3",
+      "requirement": "Inspect supplied binaries for weaknesses",
+      "page": 2,
+      "status": "core implemented; discovered-artifact extension in progress",
+      "evidence": [
+        "app/agents/binary_analysis/agent.py",
+        "app/agents/binary_analysis/ghidra_adapter.py",
+        "app/agents/binary_analysis/discovered_artifact.py"
+      ],
+      "gap": "The reviewed consolidated report has no binary findings/evidence. Claude is changing acquisition, raw-byte provenance and no-fixture behaviour.",
+      "acceptance": "Analyse a real supplied or authorised acquired artifact; retain hash/source/offset/method; qualify strings-only limitations; no authentication attempt."
+    },
+    {
+      "id": "FR-4",
+      "requirement": "Share findings and hand off work without repetition",
+      "page": 2,
+      "status": "partially implemented",
+      "evidence": [
+        "app/orchestrator/graph.py",
+        "app/orchestrator/nodes.py",
+        "app/database/repository.py",
+        "app/adapters/network_graph_adapter.py"
+      ],
+      "gap": "One-pass orchestration and task upserts lack atomic leases, stable artifact-based identity and restart proof; Probe application-view evidence is lost at adapter boundary.",
+      "acceptance": "A duplicated/reordered web reference and a crash/restart produce exactly one eligible binary analysis and one durable result, preserving discovery provenance."
+    },
+    {
+      "id": "FR-5",
+      "requirement": "Map each step to a PTES phase",
+      "page": 2,
+      "status": "partial; event-contract defect demonstrated",
+      "evidence": [
+        "app/analysis/ptes_mapper.py",
+        "app/orchestrator/nodes.py",
+        "evidence/reports/ASSESSMENT-B027905184_report.json"
+      ],
+      "gap": "33 unmapped activities in reviewed report; producer operation fields mismatch mapper; triggered-binary tool executions omitted by PTES collector.",
+      "acceptance": "Every executed step in one real end-to-end assessment maps to a justified phase; unmapped activities are zero or explicitly waived."
+    },
+    {
+      "id": "FR-6",
+      "requirement": "Verify findings rather than only flagging them",
+      "page": 2,
+      "status": "partial; evidence ownership defect demonstrated",
+      "evidence": [
+        "app/analysis/evidence_validator.py",
+        "app/analysis/attack_paths.py",
+        "probe-data/prd-audit-20261031/reproductions.json"
+      ],
+      "gap": "Evidence ID existence is accepted without finding ownership; unrelated confirmed weaknesses can generate verified access transitions.",
+      "acceptance": "Reject mismatched evidence; require direct, scoped request/response or static artifact proof; require separate transition evidence for access edges."
+    },
+    {
+      "id": "FR-7",
+      "requirement": "One report with attack path, simple API/page and README",
+      "page": 2,
+      "status": "partially implemented; outputs exist",
+      "evidence": [
+        "app/reporting/generator.py",
+        "app/api/routes.py",
+        "README.md"
+      ],
+      "gap": "JSON includes path edges; PDF writer does not render an attack-path section. Newly triggered binary branch is not included in every reporting/provenance collector.",
+      "acceptance": "One real run yields matching JSON/PDF/API output including asset/service inventory, findings, evidence-backed path, PTES events, limitations and fixture provenance."
+    }
+  ],
+  "bonuses": [
+    {
+      "id": "B-1",
+      "feature": "Planted flags",
+      "status": "not demonstrated in reviewed evidence; optional"
+    },
+    {
+      "id": "B-2",
+      "feature": "Verified crown-jewel chain",
+      "status": "not demonstrated; potential graph edges are insufficient; optional"
+    },
+    {
+      "id": "B-3",
+      "feature": "Plain-English remediation",
+      "status": "implemented for supported finding templates; completeness not measured; optional"
+    },
+    {
+      "id": "B-4",
+      "feature": "New agent/check from configuration alone",
+      "status": "not demonstrated; routing and checks are primarily code-defined; optional"
+    },
+    {
+      "id": "B-5",
+      "feature": "Live multi-agent dashboard",
+      "status": "not implemented as a unified live view; Probe UI and task-status API exist; optional"
+    }
+  ],
+  "evidence_sha256": {
+    "app/analysis/attack_paths.py": "3d68bb90c1265a5c8c7bfcd224c9aef4ec0e30876cfb9e765cba3584bedc6b47",
+    "app/analysis/evidence_validator.py": "916535fb1439ed48a0aad85d0a060197cad713a8ee2a6e326f5c1883467c43fa",
+    "app/analysis/ptes_mapper.py": "e93f00e7d811dbb0bab56d4a6a5027565a90e095a5c36c611dc16243c6f06ef9",
+    "app/orchestrator/graph.py": "8d98544cc4742aaf648fc87a5c14a8e09ad30563f9e8df6ec4624c9df6324b65",
+    "app/orchestrator/nodes.py": "1c955e60efadb77d490eca1a6be5346942e962a82ca14de69347a8b8f000e276",
+    "app/reporting/generator.py": "6408a712a6c56a3c63f8a1b4a731794151da356294eed550d6a9bbaf62bd4e5a",
+    "app/adapters/network_graph_adapter.py": "71de3f25768916547a071057f370d1c0c251519e491e4032ef1ae318ae6f13be",
+    "app/database/repository.py": "fafd87739d244924e0e483bb9c6956c1a93ff3151ba9840c595748ca40696632",
+    "app/core/schemas.py": "78fe5970d075de181e71f8f1f06ea2f4e0c3ea2f4765fd7cba9fb47611563577",
+    "app/core/scope_guard.py": "003dfe6a4a2cb0fc200a46d442945971d24b0de5c4009c186ab1684c426d6faa",
+    "app/agents/web_security/agent.py": "23e08d6e9ed3c3bde6b12f4eaab2bffbc72e59e6c87483e2c3a8d84992b264d1",
+    "app/agents/binary_analysis/acquisition.py": "61c38456ac582fd1c5bff3bc63b5c83887dae69a2b83d2cf7607d0552682a697",
+    "app/agents/binary_analysis/discovered_artifact.py": "ed5aec8c6eb1f110a3717851639f91b372b2ca4b4af04f1a19b82d79f98d2053",
+    "docker-compose.yml": "e336c3144639fa36469f6450d321faedfba07f5b5316f8aa84100d84f3ba996d",
+    "evidence/reports/ASSESSMENT-B027905184_report.json": "fc06045cadbbf5358e1ff83a70fd22ced5cec846e0846186b9e9bc71e9c5b56d",
+    "probe-data/roamer-hidden-verified-20261031/report.json": "77df733a9089a8c1b3c7f002249d313b8a3ecccde8e659611de2b1040aff14f6"
+  },
+  "parallel_work": "Claude-owned web/binary acquisition/provenance/handoff files are in progress; no application source was changed during this audit.",
+  "validation": "Read-only inspection plus three local pure-function reproductions; no network operations, assessments, binary execution or full test-suite run.",
+  "reproductions": "probe-data/prd-audit-20261031/reproductions.json"
+}

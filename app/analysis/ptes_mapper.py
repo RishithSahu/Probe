@@ -31,6 +31,18 @@ _ACTIVITY_PHASE_MAP: dict[tuple[str, str], PtesPhase] = {
     ("network_vulnerability_detective", "service_check"): PtesPhase.VULNERABILITY_ANALYSIS,
     ("zap_active", "scan"): PtesPhase.EXPLOITATION,
     ("zap", "active_scan"): PtesPhase.EXPLOITATION,
+    ("content_discovery", "discover"): PtesPhase.INTELLIGENCE_GATHERING,
+    ("binary_analysis_agent", "acquire"): PtesPhase.INTELLIGENCE_GATHERING,
+    ("binary_analysis_agent", "static_analysis"): PtesPhase.VULNERABILITY_ANALYSIS,
+}
+
+# Compatibility with the specific legacy producers that omit an operation.
+# An explicit unknown operation is never replaced by a guess. Every use of
+# these defaults is recorded in the summary until producers are standardised.
+_LEGACY_OPERATIONS = {
+    "httpx": "fingerprint", "katana": "crawl", "zap_passive": "scan",
+    "zap_active": "scan", "ghidra": "static_analysis",
+    "file+readelf+checksec": "identify", "content_discovery": "discover",
 }
 
 _AGENT_DEFAULT_PHASE: dict[AgentId, PtesPhase] = {
@@ -46,12 +58,18 @@ class PtesSummary:
     phase_activity_counts: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     phase_finding_counts: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     unmapped_activities: list[tuple[str, str]] = field(default_factory=list)
+    inferred_operations: list[tuple[str, str]] = field(default_factory=list)
+    skipped_activities: list[tuple[str, str]] = field(default_factory=list)
+    failed_activity_counts: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     def to_dict(self) -> dict:
         return {
             "phase_activity_counts": dict(self.phase_activity_counts),
             "phase_finding_counts": dict(self.phase_finding_counts),
             "unmapped_activities": self.unmapped_activities,
+            "inferred_operations": self.inferred_operations,
+            "skipped_activities": self.skipped_activities,
+            "failed_activity_counts": dict(self.failed_activity_counts),
         }
 
 
@@ -69,14 +87,20 @@ def classify_finding(finding: Finding) -> PtesPhase:
 def summarise_activities(tool_executions: list[dict], findings: list[Finding]) -> PtesSummary:
     summary = PtesSummary()
     for execution in tool_executions:
-        tool = execution.get("tool", "")
-        operation = execution.get("operation", execution.get("op", ""))
+        tool = str(execution.get("tool") or "")
+        operation = str(execution.get("operation") or execution.get("op") or "")
+        if not operation and tool in _LEGACY_OPERATIONS:
+            operation = _LEGACY_OPERATIONS[tool]
+            summary.inferred_operations.append((tool, operation))
         phase = classify_activity(tool, operation)
         if phase is None:
-            # Fall back to a coarse guess based on tool name alone so the
-            # report isn't littered with unmapped entries for near-misses,
-            # but still record it as unmapped for visibility/audit.
             summary.unmapped_activities.append((tool, operation))
+            continue
+        if execution.get("ran") is False or execution.get("allowed") is False:
+            summary.skipped_activities.append((tool, operation))
+            continue
+        if execution.get("error"):
+            summary.failed_activity_counts[phase.value] += 1
             continue
         summary.phase_activity_counts[phase.value] += 1
 

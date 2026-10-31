@@ -1,7 +1,7 @@
 """Consolidated report generation: JSON (machine-readable, full fidelity) and
-PDF (human-readable, via ReportLab) from the same underlying data — built
-from the Orchestrator's final `OrchestratorState`, never recomputed from
-scratch, so both artifacts describe exactly what this run actually did.
+PDF (human-readable, via ReportLab) from the same underlying data. Activity
+mapping is derived from every recorded agent result, including handoffs;
+no discovery or analysis is repeated to produce either artifact.
 
 Narrative text sections (executive summary, methodology) are rendered via
 Jinja2 templates in `templates/` so their wording can be edited without
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +21,27 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
+    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
+)
+
+from app.adapters.discovery_snapshot import read_snapshot
+from app.analysis.ptes_mapper import summarise_activities
+from app.core.exceptions import GraphValidationError
+from app.core.schemas import AgentResult, PtesPhase, TaskStatus
+from app.reporting.completeness import assessment_coverage
+from app.reporting.pdf_sections import (
+    attack_paths_section,
+    coverage_section,
+    evidence_section,
+    inventory_section,
+    table,
+    text,
 )
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -37,6 +52,12 @@ _jinja_env = Environment(
 )
 
 _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
+_AGENT_RESULT_LABELS = (
+    ("web_agent_result", "Web Security Agent"),
+    ("binary_agent_result", "Binary Analysis Agent"),
+    ("network_vulnerability_result", "Network Vulnerability Detective"),
+    ("triggered_binary_agent_result", "Discovered Binary Analysis Agent"),
+)
 _SEVERITY_COLORS = {
     "critical": colors.HexColor("#7a0d0d"),
     "high": colors.HexColor("#c0392b"),
@@ -62,6 +83,39 @@ def _build_report_data(state: dict) -> dict[str, Any]:
     validation_report = state.get("validation_report", {})
     attack_path_edges = state.get("attack_path_edges", [])
     ptes_summary = state.get("ptes_summary", {})
+    agent_results = [result for result in state.values() if isinstance(result, AgentResult)]
+    if agent_results:
+        # Derive report mapping from all recorded branches, including handoffs.
+        # The orchestration state is not mutated and no activities are invented.
+        ptes_summary = summarise_activities(
+            [event for result in agent_results for event in result.tool_executions], findings,
+        ).to_dict()
+    coverage_state = dict(state)
+    discovery_provenance = {}
+    if graph and graph.raw_source_ref and Path(graph.raw_source_ref).parent.name == "discovery_snapshots":
+        try:
+            snapshot = read_snapshot(graph.raw_source_ref)
+            if snapshot.get("scope_id") != state.get("scope_id"):
+                raise GraphValidationError("Retained snapshot scope does not match the report")
+            raw = snapshot["payload"]
+            probe_report = raw.get("_probe_metadata", {}).get("report", {})
+            converged = probe_report.get("summary", {}).get("converged")
+            if isinstance(converged, bool) and "discovery_report" not in coverage_state:
+                coverage_state["discovery_report"] = {"converged": converged}
+            discovery_provenance = {
+                "snapshot_ref": graph.raw_source_ref, "snapshot_sha256": Path(graph.raw_source_ref).stem,
+                "integrity_verified": True, "observation_only": True,
+                "recorded_scope": probe_report.get("authorised_scope"),
+                "import_limitations": raw.get("_import_limitations", []),
+                "network_observation_count": len(probe_report.get("network_observations", [])),
+                "meaning": "Preserved discovery evidence; not a permission grant or instruction to replay a method.",
+            }
+        except (GraphValidationError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            discovery_provenance = {"integrity_verified": False, "import_limitations": ["Retained discovery evidence could not be verified"]}
+    coverage = assessment_coverage(coverage_state)
+    if discovery_provenance and not discovery_provenance.get("integrity_verified"):
+        coverage["overall"] = "incomplete"
+        coverage["evidence_incomplete"] = True
 
     findings_by_status = Counter(f.status.value for f in findings)
     findings_by_severity = Counter(f.severity.value for f in findings)
@@ -70,14 +124,34 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         findings_by_surface.setdefault(f.surface.value, []).append(_finding_dict(f))
 
     incomplete_tasks = []
-    for result_key, label in (
-        ("web_agent_result", "Web Security Agent"),
-        ("binary_agent_result", "Binary Analysis Agent"),
-        ("network_vulnerability_result", "Network Vulnerability Detective"),
-    ):
-        result = state.get(result_key)
-        if result is not None and result.errors:
+    agent_execution_summary = {}
+    labels = dict(_AGENT_RESULT_LABELS)
+    for result_key, result in state.items():
+        if not isinstance(result, AgentResult):
+            continue
+        label = labels.get(result_key, result_key)
+        agent_execution_summary[result_key] = {
+            "status": result.execution_status.value,
+            "errors": list(result.errors),
+            "tool_execution_count": len(result.tool_executions),
+        }
+        if result.errors:
             incomplete_tasks.append(f"{label}: {'; '.join(result.errors)}")
+        if result.execution_status != TaskStatus.COMPLETED:
+            incomplete_tasks.append(f"{label}: execution status {result.execution_status.value}")
+    if validation_report.get("invalid_count"):
+        incomplete_tasks.append(f"Evidence validation rejected {validation_report['invalid_count']} finding(s); see evidence_validation")
+    if validation_report.get("incomplete_evidence"):
+        incomplete_tasks.append(
+            f"Evidence is incomplete for {len(validation_report['incomplete_evidence'])} finding(s); see evidence_validation"
+        )
+    if coverage["missing_or_incomplete_surfaces"]:
+        incomplete_tasks.append("Required surfaces incomplete: " + ", ".join(coverage["missing_or_incomplete_surfaces"]))
+    if coverage["discovery_status"] != "complete":
+        incomplete_tasks.append("Discovery completeness is " + coverage["discovery_status"])
+    if ptes_summary.get("unmapped_activities"):
+        incomplete_tasks.append(f"PTES phase is unresolved for {len(ptes_summary['unmapped_activities'])} activity record(s)")
+    incomplete_tasks.extend(discovery_provenance.get("import_limitations", []))
     if not state.get("network_agent_findings"):
         incomplete_tasks.append("External Network Vulnerability Agent: no results ingested for this run")
 
@@ -90,10 +164,7 @@ def _build_report_data(state: dict) -> dict[str, Any]:
     # already carries `used_fixture`; this surfaces it as an explicit,
     # unmissable report section instead of silently losing that signal.
     fixture_tools_used: set[str] = set()
-    for result_key in ("web_agent_result", "binary_agent_result", "network_vulnerability_result"):
-        result = state.get(result_key)
-        if result is None:
-            continue
+    for result in agent_results:
         for te in result.tool_executions:
             if te.get("used_fixture"):
                 fixture_tools_used.add(te.get("tool", "unknown"))
@@ -113,6 +184,7 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         severity_counts={s: findings_by_severity.get(s, 0) for s in _SEVERITY_ORDER if findings_by_severity.get(s, 0)},
         incomplete_tasks=incomplete_tasks,
         fixture_tools_used=fixture_tools_used,
+        coverage=coverage,
     )
     methodology = _jinja_env.get_template("methodology.txt.j2").render(
         crawling_enabled=policy_dict.get("allow_web_crawling", False),
@@ -121,7 +193,7 @@ def _build_report_data(state: dict) -> dict[str, Any]:
 
     return {
         "schema_version": "1.0.0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "assessment_id": assessment_id,
         "scope_id": state.get("scope_id", ""),
         "executive_summary": exec_summary.strip(),
@@ -139,6 +211,9 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         "attack_paths": attack_path_edges,
         "ptes_mapping": ptes_summary,
         "incomplete_tasks_and_limitations": incomplete_tasks,
+        "agent_execution_summary": agent_execution_summary,
+        "assessment_coverage": coverage,
+        "discovery_provenance": discovery_provenance,
         # See the fixture_tools_used comment above `exec_summary` — this is
         # the authoritative, machine-readable form of that warning. A
         # non-empty list means at least one tool's findings in this report
@@ -169,7 +244,7 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
     story = []
 
     story.append(Paragraph("Autonomous Security Assessment Report", styles["Title"]))
-    story.append(Paragraph(f"Assessment {report_data['assessment_id']} &middot; Scope {report_data['scope_id']}", styles["Normal"]))
+    story.append(Paragraph(f"Assessment {text(report_data['assessment_id'])} &middot; Scope {text(report_data['scope_id'])}", styles["Normal"]))
     story.append(Paragraph(f"Generated {report_data['generated_at']}", styles["Normal"]))
     story.append(Spacer(1, 0.5 * cm))
 
@@ -181,7 +256,7 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
         )
         story.append(Paragraph(
             f"<b>DATA INTEGRITY WARNING</b> &mdash; this report contains SYNTHETIC/FIXTURE data from: "
-            f"<b>{', '.join(fixture_tools)}</b>. These tool(s) were unavailable during this run; their "
+            f"<b>{text(', '.join(fixture_tools))}</b>. These tool(s) were unavailable during this run; their "
             "findings are documented placeholders, not real scan results, and must not be acted on as such.",
             warning_style,
         ))
@@ -190,7 +265,7 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
     story.append(Paragraph("Executive Summary", styles["Heading1"]))
     for para in report_data["executive_summary"].split("\n\n"):
         if para.strip():
-            story.append(Paragraph(para.strip(), styles["Normal"]))
+            story.append(Paragraph(text(para.strip()), styles["Normal"]))
             story.append(Spacer(1, 0.2 * cm))
 
     story.append(Paragraph("Assessment Scope", styles["Heading1"]))
@@ -204,9 +279,11 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
     story.append(Paragraph("Methodology", styles["Heading1"]))
     for para in report_data["methodology"].split("\n\n"):
         if para.strip():
-            story.append(Paragraph(para.strip(), styles["Normal"]))
+            story.append(Paragraph(text(para.strip()), styles["Normal"]))
             story.append(Spacer(1, 0.2 * cm))
 
+    story.extend(coverage_section(report_data, styles))
+    story.extend(inventory_section(report_data, styles, doc.width))
     story.append(PageBreak())
     story.append(Paragraph("Findings Summary", styles["Heading1"]))
     summary = report_data["findings_summary"]
@@ -218,45 +295,62 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
         [sev, str(summary["by_severity"].get(sev, 0))] for sev in _SEVERITY_ORDER if summary["by_severity"].get(sev, 0)
     ]
     story.append(Table(severity_rows, style=_table_style()))
+    for label, key in (("Network Findings", "network"), ("Web Security Findings", "web"), ("Binary Analysis Findings", "binary")):
+        if not report_data["findings_by_surface"].get(key):
+            story.append(Paragraph(f"{label}: no findings recorded.", styles["Normal"]))
 
     for surface_label, surface_key in (("Network Findings", "network"), ("Web Security Findings", "web"), ("Binary Analysis Findings", "binary")):
         findings = report_data["findings_by_surface"].get(surface_key, [])
+        if not findings:
+            continue
         story.append(PageBreak())
         story.append(Paragraph(surface_label, styles["Heading1"]))
-        if not findings:
-            story.append(Paragraph("No findings for this surface.", styles["Normal"]))
-            continue
         for f in findings:
-            story.append(Paragraph(f"{f['title']}  [{f['severity'].upper()} / {f['status'].upper()}]", styles["Heading3"]))
-            story.append(Paragraph(f"Agent: {f['agent_id']} &middot; Detection: {f.get('detection_method') or 'n/a'}", styles["Normal"]))
-            story.append(Paragraph(f.get("description", ""), styles["Normal"]))
+            group = [Paragraph(text(f"{f['title']}  [{f['severity'].upper()} / {f['status'].upper()}]"), styles["Heading3"]),
+                     Paragraph(f"Agent: {text(f['agent_id'])} &middot; Detection: {text(f.get('detection_method') or 'n/a')}", styles["Normal"]),
+                     Paragraph(text(f.get("description", "")), styles["Normal"])]
             if f.get("remediation"):
-                story.append(Paragraph(f"Remediation: {f['remediation']}", styles["Normal"]))
-            story.append(Paragraph(f"PTES phase: {f.get('ptes_phase', 'n/a')} &middot; Evidence: {', '.join(f.get('evidence_refs', [])) or 'none'}", styles["Normal"]))
-            story.append(Spacer(1, 0.3 * cm))
+                group.append(Paragraph(f"Remediation: {text(f['remediation'])}", styles["Normal"]))
+            group.append(Paragraph(f"PTES phase: {text(f.get('ptes_phase', 'n/a'))} &middot; Evidence: {text(', '.join(f.get('evidence_refs', [])) or 'none')}", styles["Normal"]))
+            story.append(KeepTogether(group))
 
+    story.extend(attack_paths_section(report_data, styles))
+    story.extend(evidence_section(report_data, styles))
     story.append(PageBreak())
     story.append(Paragraph("PTES Mapping", styles["Heading1"]))
     ptes = report_data.get("ptes_mapping", {})
-    ptes_rows = [["Phase", "Activities", "Findings"]]
-    for phase in set(list(ptes.get("phase_activity_counts", {}).keys()) + list(ptes.get("phase_finding_counts", {}).keys())):
+    ptes_rows = []
+    for phase in (item.value for item in PtesPhase):
+        if not any(phase in ptes.get(key, {}) for key in ("phase_activity_counts", "phase_finding_counts", "failed_activity_counts")):
+            continue
         ptes_rows.append([
             phase,
             str(ptes.get("phase_activity_counts", {}).get(phase, 0)),
             str(ptes.get("phase_finding_counts", {}).get(phase, 0)),
+            str(ptes.get("failed_activity_counts", {}).get(phase, 0)),
         ])
-    story.append(Table(ptes_rows, style=_table_style()))
+    story.append(table(["Phase", "Activities", "Findings", "Failed attempts"], ptes_rows, styles, doc.width))
+    for key, label in (("inferred_operations", "Legacy operations inferred"), ("unmapped_activities", "Unmapped activities"), ("skipped_activities", "Activities not executed")):
+        for activity in ptes.get(key, []):
+            story.append(Paragraph(f"{label}: {text(activity)}", styles["Normal"]))
 
     story.append(PageBreak())
     story.append(Paragraph("Incomplete Tasks and Limitations", styles["Heading1"]))
     limitations = report_data.get("incomplete_tasks_and_limitations", [])
     if limitations:
         for item in limitations:
-            story.append(Paragraph(f"&bull; {item}", styles["Normal"]))
+            story.append(Paragraph(f"&bull; {text(item)}", styles["Normal"]))
     else:
         story.append(Paragraph("No incomplete tasks were recorded for this assessment.", styles["Normal"]))
 
-    doc.build(story)
+    def page_footer(canvas, document):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#64748b"))
+        canvas.drawRightString(document.pagesize[0] - document.rightMargin, 20, f"Page {document.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
     return output_path
 
 

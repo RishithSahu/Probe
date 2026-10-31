@@ -12,10 +12,13 @@ import logging
 import time
 from pathlib import Path
 
+from app.adapters.authorisation_grants import headers_for_url
+from app.agents.web_security.content_discovery import discover_hidden_paths
 from app.agents.web_security.crawler import crawl
 from app.agents.web_security.findings import findings_from_fingerprint, findings_from_zap_alerts
 from app.agents.web_security.fingerprint import fingerprint_url
 from app.agents.web_security.zap_integration import run_active_scan_if_authorised, run_passive_scan
+from app.core.config import settings
 from app.core.exceptions import ScopeViolationError, ToolExecutionError
 from app.core.schemas import (
     AgentId,
@@ -46,16 +49,16 @@ def assess_target(
     scope_guard: ScopeGuard,
     policy: AssessmentPolicy,
     output_dir: Path,
-) -> tuple[list[Finding], list[Evidence], list[str], list[dict], list[str]]:
-    """Run Stages A-C for one target. Returns (findings, evidence, endpoint
-    urls, tool_execution_records, errors) — never raises for an individual
-    target's tool failure; scope violations and tool errors both become
-    entries in the returned `errors` list instead."""
+) -> tuple[list[Finding], list[Evidence], list[str], list[dict], list[str], list[dict]]:
+    """Run Stages A-C (+ content discovery) for one target. Returns (findings, evidence, endpoint urls,
+    tool_execution_records, errors, binary_references) — never raises for an individual target's tool
+    failure; scope violations and tool errors both become entries in the returned `errors` list instead."""
     findings: list[Finding] = []
     evidence: list[Evidence] = []
     endpoints: list[str] = []
     tool_executions: list[dict] = []
     errors: list[str] = []
+    binary_references: list[dict] = []
 
     # Stage A: fingerprinting
     try:
@@ -67,8 +70,10 @@ def assess_target(
         if fp.error:
             errors.append(f"fingerprint({target.url}): {fp.error}")
     except ScopeViolationError as exc:
+        # BUG FIX: this used to abort the WHOLE target here, so disabling Stage A (allow_passive_web_analysis)
+        # silently skipped every later stage too, including content discovery (Stage E) -- which has its own,
+        # independent policy flag and scope-guard check and must not depend on Stage A's permission at all.
         errors.append(f"fingerprint({target.url}) rejected by scope guard: {exc}")
-        return findings, evidence, endpoints, tool_executions, errors
 
     # Stage B: crawling (only if authorised)
     if policy.allow_web_crawling:
@@ -116,7 +121,29 @@ def assess_target(
         except (ScopeViolationError, ToolExecutionError) as exc:
             errors.append(f"zap_active({target.url}): {exc}")
 
-    return findings, evidence, endpoints, tool_executions, errors
+    # Stage E: generic hidden-path content discovery -- resource discovery only; see content_discovery.py's
+    # own docstring for why this never extracts a credential itself.
+    if policy.allow_content_discovery:
+        try:
+            discovery = discover_hidden_paths(
+                target.url, asset_id=target.asset_id, scope_guard=scope_guard,
+                max_requests=policy.max_content_discovery_requests,
+                rate_per_second=policy.content_discovery_rate_per_second,
+                extra_headers=headers_for_url(target.url, settings.authorisations_path),
+            )
+            tool_executions.append({
+                "tool": "content_discovery", "target": target.url, "requests_made": discovery.requests_made,
+                "hits": len(discovery.hits), "binary_references": len(discovery.binary_references),
+            })
+            errors.extend(f"content_discovery({target.url}): {e}" for e in discovery.errors)
+            binary_references.extend({
+                "asset_id": ref.asset_id, "url": ref.url, "content_type": ref.content_type,
+                "content_length": ref.content_length, "reason": ref.reason,
+            } for ref in discovery.binary_references)
+        except (ScopeViolationError, ToolExecutionError) as exc:
+            errors.append(f"content_discovery({target.url}): {exc}")
+
+    return findings, evidence, endpoints, tool_executions, errors, binary_references
 
 
 def run_web_security_agent(
@@ -133,9 +160,10 @@ def run_web_security_agent(
     all_endpoints: list[str] = []
     all_tool_executions: list[dict] = []
     all_errors: list[str] = []
+    all_binary_references: list[dict] = []
 
     for target in targets:
-        findings, evidence, endpoints, tool_executions, errors = assess_target(
+        findings, evidence, endpoints, tool_executions, errors, binary_references = assess_target(
             target, assessment_id=assessment_id, scope_guard=scope_guard, policy=policy, output_dir=output_dir,
         )
         all_findings.extend(findings)
@@ -143,6 +171,7 @@ def run_web_security_agent(
         all_endpoints.extend(endpoints)
         all_tool_executions.extend(tool_executions)
         all_errors.extend(errors)
+        all_binary_references.extend(binary_references)
 
     duration = time.monotonic() - start
     # The agent as a whole only "fails" if every target failed with zero
@@ -159,6 +188,7 @@ def run_web_security_agent(
         findings=all_findings,
         evidence=all_evidence,
         discovered_endpoints=all_endpoints,
+        discovered_binary_references=all_binary_references,
         tool_executions=all_tool_executions,
         errors=all_errors,
         duration_seconds=duration,

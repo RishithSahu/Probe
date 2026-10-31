@@ -44,24 +44,49 @@ def validate_schema_and_evidence_refs(
     """Checks that:
     1. Every finding's `evidence_refs` actually resolve to a supplied Evidence
        object (never a dangling reference).
-    2. A finding claiming `status=confirmed` already has at least one
-       evidence reference (can't be confirmed with zero evidence).
-    3. A finding with incomplete evidence (fewer refs than its
-       detection_method would be expected to produce) is flagged, not
-       silently passed.
+    2. Referenced evidence belongs to the finding and has an unambiguous ID.
+    3. A confirmed finding has recorded observation data or an artifact
+       reference. Description-only records remain incomplete, not proof.
+
+    This checks evidence integrity, not the truth of arbitrary raw data or
+    the contents of a referenced artifact.
     """
-    evidence_ids = {e.evidence_id for e in evidence}
+    evidence_by_id: dict[str, Evidence] = {}
+    conflicting_ids: set[str] = set()
+    for item in evidence:
+        previous = evidence_by_id.get(item.evidence_id)
+        if previous is not None and previous != item:
+            conflicting_ids.add(item.evidence_id)
+        evidence_by_id[item.evidence_id] = item
     report = ValidationReport(total_findings=len(findings))
 
     for finding in findings:
-        missing_refs = [ref for ref in finding.evidence_refs if ref not in evidence_ids]
+        missing_refs = [ref for ref in finding.evidence_refs if ref not in evidence_by_id]
         if missing_refs:
             report.invalid.append((finding, f"evidence_refs reference missing evidence: {missing_refs}"))
+            continue
+        ambiguous_refs = [ref for ref in finding.evidence_refs if ref in conflicting_ids]
+        if ambiguous_refs:
+            report.invalid.append((finding, f"conflicting evidence records for IDs: {ambiguous_refs}"))
+            continue
+        foreign_refs = [
+            ref for ref in finding.evidence_refs
+            if evidence_by_id[ref].finding_id != finding.finding_id
+        ]
+        if foreign_refs:
+            report.invalid.append((finding, f"evidence belongs to another finding: {foreign_refs}"))
             continue
         if finding.status == FindingStatus.CONFIRMED and not finding.evidence_refs:
             report.invalid.append((finding, "status=confirmed but no evidence_refs present"))
             continue
-        if not finding.evidence_refs:
+        has_observation = any(
+            evidence_by_id[ref].raw_data or evidence_by_id[ref].storage_path
+            for ref in finding.evidence_refs
+        )
+        if not has_observation and finding.status == FindingStatus.CONFIRMED:
+            report.invalid.append((finding, "status=confirmed but evidence has no observation or artifact reference"))
+            continue
+        if not has_observation:
             report.incomplete_evidence.append(finding.finding_id)
         report.valid.append(finding)
 
@@ -89,11 +114,21 @@ def promote_finding(
     return updated
 
 
-def auto_confirm_eligible(findings: list[Finding]) -> list[Finding]:
+def auto_confirm_eligible(
+    findings: list[Finding], *, evidence: list[Evidence] | None = None
+) -> list[Finding]:
     """Applies the narrow, deterministic auto-confirmation policy and returns
     the (possibly) updated list. Only findings whose `detection_method` is in
-    `_AUTO_CONFIRM_DETECTION_METHODS` AND carry high confidence are promoted;
-    everything else is returned unchanged (still `suspected`)."""
+    `_AUTO_CONFIRM_DETECTION_METHODS` AND carry high confidence are promoted.
+    Evidence must also pass ownership/reference checks and contain an
+    observation. Omitting evidence never promotes a finding. Invalid inputs
+    are left unchanged here; the full pipeline filters them out."""
+    validation = validate_schema_and_evidence_refs(findings, evidence or [])
+    eligible_objects = {
+        id(f) for f in validation.valid
+        if f.finding_id not in validation.incomplete_evidence
+    }
+    observations = {item.evidence_id: item for item in evidence or []}
     result = []
     for f in findings:
         if (
@@ -101,11 +136,35 @@ def auto_confirm_eligible(findings: list[Finding]) -> list[Finding]:
             and f.detection_method in _AUTO_CONFIRM_DETECTION_METHODS
             and f.confidence == Confidence.HIGH
             and f.evidence_refs
+            and id(f) in eligible_objects
+            and any(_supports_deterministic_check(f, observations[ref]) for ref in f.evidence_refs)
         ):
             result.append(promote_finding(f, new_status=FindingStatus.CONFIRMED, reviewer_note="auto-confirmed: deterministic header/cookie check"))
         else:
             result.append(f)
     return result
+
+
+def _supports_deterministic_check(finding: Finding, evidence: Evidence) -> bool:
+    """Recheck the observation instead of trusting a method label alone."""
+    data = evidence.raw_data or {}
+    if evidence.source_tool != "httpx" or evidence.evidence_type != "http_response" or data.get("used_fixture"):
+        return False
+    if finding.detection_method == "httpx_header_analysis":
+        headers = data.get("headers")
+        missing = data.get("missing")
+        if not isinstance(headers, dict) or not isinstance(missing, list) or not missing:
+            return False
+        present = {str(name).lower() for name in headers}
+        return all(isinstance(name, str) and name.strip() and name.lower() not in present for name in missing)
+    if finding.detection_method == "httpx_cookie_analysis":
+        return (
+            isinstance(data.get("name"), str) and bool(data["name"].strip())
+            and isinstance(data.get("secure"), bool)
+            and isinstance(data.get("httponly"), bool)
+            and (not data["secure"] or not data["httponly"])
+        )
+    return False
 
 
 def run_evidence_validation(findings: list[Finding], evidence: list[Evidence]) -> tuple[list[Finding], ValidationReport]:
@@ -118,7 +177,7 @@ def run_evidence_validation(findings: list[Finding], evidence: list[Evidence]) -
     if findings and not report.valid:
         raise EvidenceValidationError("all findings failed evidence validation")
 
-    promoted = auto_confirm_eligible(report.valid)
+    promoted = auto_confirm_eligible(report.valid, evidence=evidence)
     # auto_confirmed must mean "this pass promoted it" — not merely "its
     # status happens to be CONFIRMED now". Every producer starts a finding
     # `suspected`, so this distinction has no effect today, but comparing

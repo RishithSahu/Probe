@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     network_graph_dir: Path = Field(default=Path("inputs/network_graphs"))
     binaries_dir: Path = Field(default=Path("inputs/binaries"))
     reports_dir: Path = Field(default=Path("evidence/reports"))
+    authorisations_path: Path | None = Field(
+        default=None,
+        description="Optional path to Probe's authorisations.json (explicit scope/method grants). When set, "
+        "content discovery applies any matching method_grant's header to its own requests -- see "
+        "app/adapters/authorisation_grants.py. Never required; absent means no extra headers are applied.",
+    )
 
     # --- Web Security Agent tool integrations ---------------------------------
     katana_binary: str = Field(default="katana")

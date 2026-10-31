@@ -9,11 +9,14 @@ possible:
     POTENTIAL_ACCESS_RELATION): derived purely from the network graph's own
     topology and from a finding's existence. These represent *possible*
     relationships, not demonstrated ones.
-  - Evidence-backed edges (AFFECTED_BY, VERIFIED_TRANSITION): only added when
-    a finding's status is `confirmed` with supporting evidence. Network
-    connectivity alone is never treated as proof of compromise — a
-    CONNECTS_TO edge never becomes a VERIFIED_TRANSITION without a matching
-    confirmed finding.
+  - Evidence-backed weakness edges (AFFECTED_BY): added for validated,
+    confirmed findings with evidence references. This builder consumes the
+    evidence validator's output; it does not verify raw artifacts itself.
+
+VERIFIED_TRANSITION is reserved for demonstrated access transitions. Neither
+connectivity nor a confirmed weakness proves access, so this builder never
+derives that relation from findings. A future transition-proof contract is
+required before access transitions can be added.
 
 Nothing here performs lateral movement or any live validation; it is a pure
 graph-construction/analysis pass over already-collected data.
@@ -120,6 +123,8 @@ def build_attack_path_graph(
     # finding node so unconfirmed findings are still visible in the graph
     # without implying anything was actually demonstrated). --------------
     for finding in findings:
+        if finding.status == FindingStatus.REJECTED:
+            continue
         finding_node = f"finding:{finding.finding_id}"
         g.add_node(
             finding_node,
@@ -134,15 +139,8 @@ def build_attack_path_graph(
         if target_node not in g:
             g.add_node(target_node, kind="binary" if finding.surface == Surface.BINARY else "host")
 
-        if finding.status == FindingStatus.CONFIRMED:
+        if finding.status == FindingStatus.CONFIRMED and finding.evidence_refs:
             add_edge(target_node, finding_node, RELATION_AFFECTED_BY, finding_id=finding.finding_id)
-            # A confirmed finding on a service/host that itself connects
-            # onward becomes a verified transition ONLY to nodes already
-            # reachable via CONNECTS_TO from this target — we never invent a
-            # new reachability relationship from a finding alone.
-            for _, neighbour, data in g.out_edges(target_node, data=True):
-                if data.get("relation") == RELATION_CONNECTS_TO:
-                    add_edge(finding_node, neighbour, RELATION_VERIFIED_TRANSITION, finding_id=finding.finding_id)
         else:
             add_edge(target_node, finding_node, RELATION_POTENTIAL_ACCESS, finding_id=finding.finding_id)
 

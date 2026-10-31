@@ -1,0 +1,20 @@
+flowchart TD
+  A["1. Scope and operation permissions — implemented; preflight before run"] --> B["2. Probe discovery — live demonstrated; bounded incomplete inventory"]
+  B --> C["3. Shared graph adapter — implemented; application evidence loss remains"]
+  C --> D["4. Task planning and dispatch — implemented; atomic claims/resume missing"]
+  D --> E["5a. Web agent — fingerprint/crawl/checks; fixture-free proof pending"]
+  D --> F["5b. Network service assessment — safe protocol checks implemented"]
+  D --> G["5c. Supplied binary analysis — core implemented; real run proof pending"]
+  D --> X["Optional external findings ingestion"]
+  E --> H["6. Binary references only — Claude in progress"]
+  H --> I["7. Orchestrator handoff → binary-owned acquisition/hash/static analysis — Claude in progress"]
+  E --> J["8. Aggregate findings and evidence — implemented"]
+  F --> J
+  G --> J
+  I --> J
+  X --> J
+  J --> K["9. Verification gate — partial; evidence binding defect"]
+  K --> L["10. Attack paths — partial; transition proof defect"]
+  L --> M["11. PTES activity mapping — partial; event contract gaps"]
+  M --> N["12. JSON / PDF / API report — implemented; integration gaps"]
+  N --> O["13. Ground-truth scoring and one-command real demo — not demonstrated"]

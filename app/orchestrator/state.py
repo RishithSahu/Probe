@@ -50,6 +50,10 @@ class OrchestratorState(TypedDict, total=False):
     network_vulnerability_result: AgentResult | None
     network_agent_findings: list[Finding]
     network_agent_evidence: list[Evidence]
+    # Dynamic handoff: binary references the Web Agent's content discovery turned up mid-run, and the result
+    # of the Binary Analysis Agent task the Orchestrator creates and dispatches for them automatically. Kept
+    # separate from binary_agent_result (organiser-supplied binaries) so provenance stays distinguishable.
+    triggered_binary_agent_result: AgentResult | None
 
     # --- Aggregation / post-processing --------------------------------------
     all_findings: list[Finding]

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,17 +65,22 @@ class GhidraAnalysisResult:
     used_fixture: bool = False
     raw_output_path: str | None = None
     error: str | None = None
+    decompiled_by_function: dict[str, str] = field(default_factory=dict)  # populated only by the real
+    # PyGhidra path (discovered_artifact.py) -- empty for the organiser-supplied subprocess/fixture path.
 
 
 def _analyzeheadless_path() -> str | None:
+    """BUG FIX: this used to return the extension-less `analyzeHeadless` shell script whenever it existed,
+    even on Windows, where Ghidra ALSO ships `analyzeHeadless.bat` specifically because the shell script
+    cannot be executed there (CreateProcess fails with WinError 193, "not a valid Win32 application"). The
+    platform-appropriate launcher must be tried first, not merely "whichever file happens to exist first"."""
     if not settings.ghidra_install_dir:
         return None
     candidate = Path(settings.ghidra_install_dir) / "support" / "analyzeHeadless"
-    if candidate.exists():
-        return str(candidate)
-    candidate_bat = candidate.with_suffix(".bat")
-    if candidate_bat.exists():
-        return str(candidate_bat)
+    ordered = [candidate.with_suffix(".bat"), candidate] if sys.platform == "win32" else [candidate, candidate.with_suffix(".bat")]
+    for c in ordered:
+        if c.exists():
+            return str(c)
     return None
 
 

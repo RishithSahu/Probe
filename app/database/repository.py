@@ -11,21 +11,20 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AssessmentNotFoundError
 from app.core.schemas import (
+    AgentTask,
     Assessment,
     AssessmentPolicy,
     AssessmentStatus,
     BinaryAsset,
-    DiscoverySource,
     Evidence,
     Finding,
-    AgentTask,
     NetworkGraph,
 )
 from app.core.scope_guard import ToolInvocationRecord
+from app.database.inventory import persist_network_graph
 from app.database.models import (
     AgentTaskRecord,
     AssessmentRecord,
-    AssetRecord,
     AttackPathRecord,
     BinaryAssetRecord,
     EvidenceRecord,
@@ -33,9 +32,7 @@ from app.database.models import (
     FindingRecord,
     NetworkGraphRecord,
     ScopePolicyRecord,
-    ServiceRecord,
 )
-
 
 # --- Assessments -------------------------------------------------------------
 
@@ -80,56 +77,7 @@ def get_assessment_policy(db: Session, assessment_id: str) -> AssessmentPolicy:
 
 
 def store_network_graph(db: Session, assessment_id: str, graph: NetworkGraph) -> None:
-    existing = db.get(NetworkGraphRecord, assessment_id)
-    if existing is not None:
-        db.delete(existing)
-        db.flush()
-
-    db.add(
-        NetworkGraphRecord(
-            assessment_id=assessment_id,
-            scope_id=graph.scope_id,
-            generated_by=graph.generated_by,
-            raw_source_ref=graph.raw_source_ref,
-            normalised_graph=graph.model_dump(mode="json"),
-        )
-    )
-
-    # Every asset in one NetworkGraph shares the same origin — the graph's
-    # own `generated_by`, not a per-asset field (NetworkGraphAssetRecord
-    # carries no discovery_source of its own). Falls back to GRAPH_IMPORT
-    # for a generated_by value that isn't a known DiscoverySource (e.g. a
-    # provisional file export's custom string).
-    try:
-        discovery_source = DiscoverySource(graph.generated_by).value
-    except ValueError:
-        discovery_source = DiscoverySource.GRAPH_IMPORT.value
-
-    # Also populate normalised Asset/Service rows for direct querying
-    # (findings join against these by original asset_id/service_id).
-    for asset in graph.assets:
-        asset_record = AssetRecord(
-            asset_id=asset.asset_id,
-            assessment_id=assessment_id,
-            ip=asset.ip,
-            hostname=asset.hostname,
-            asset_type=asset.asset_type,
-            discovery_source=discovery_source,
-        )
-        db.add(asset_record)
-        db.flush()
-        for service in asset.services:
-            db.add(
-                ServiceRecord(
-                    service_id=service.service_id,
-                    asset_db_id=asset_record.id,
-                    port=service.port,
-                    protocol=service.protocol,
-                    service_name=service.service_name,
-                    version=service.version,
-                )
-            )
-    db.flush()
+    persist_network_graph(db, assessment_id, graph)
 
 
 def load_network_graph(db: Session, assessment_id: str) -> NetworkGraph | None:

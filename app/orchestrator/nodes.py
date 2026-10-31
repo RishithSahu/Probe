@@ -23,6 +23,7 @@ from app.adapters.network_graph_adapter import (
 )
 from app.adapters.probe_leads import findings_from_probe_leads
 from app.agents.binary_analysis.agent import run_binary_analysis_agent
+from app.agents.network_security.console_auth import attempt_single_credential_verification
 from app.agents.network_vulnerability.agent import run_network_vulnerability_agent
 from app.agents.web_security.agent import WebTarget, run_web_security_agent
 from app.analysis.attack_paths import build_attack_path_graph
@@ -34,6 +35,13 @@ from app.core.schemas import (
     AgentId,
     AgentResult,
     AssessmentStatus,
+    Confidence,
+    Evidence,
+    Finding,
+    FindingStatus,
+    PtesPhase,
+    Severity,
+    Surface,
     TaskStatus,
 )
 from app.core.scope_guard import ScopeGuard
@@ -270,7 +278,11 @@ def dispatch_specialist_agents(state: OrchestratorState) -> dict:
     jobs = {}
 
     http_targets = state.get("http_targets", [])
-    if policy.allow_passive_web_analysis and http_targets:
+    # BUG FIX: this used to gate the whole Web Agent dispatch on allow_passive_web_analysis alone, so a policy
+    # that enabled ONLY allow_content_discovery (Stage E) never got the Web Agent dispatched at all -- content
+    # discovery silently never ran. Each stage already checks its own flag independently; dispatch only needs
+    # to know SOMETHING in this agent is authorised.
+    if http_targets and (policy.allow_passive_web_analysis or policy.allow_web_crawling or policy.allow_content_discovery):
         _mark_task(assessment_id, AgentId.WEB_SECURITY, TaskStatus.RUNNING)
         if settings.web_agent_service_url:
             jobs[AgentId.WEB_SECURITY.value] = lambda: _call_web_agent_remote(assessment_id, http_targets, policy, graph)
@@ -420,6 +432,215 @@ def ingest_network_agent_results(state: OrchestratorState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 8b. handle_discovered_binaries -- dynamic task-ledger handoff
+# ---------------------------------------------------------------------------
+
+
+def handle_discovered_binaries(state: OrchestratorState) -> dict:
+    """The Orchestrator's own job of noticing that a binary reference needs analysis and creating the task
+    for it, automatically -- the Web Agent only ever reports a reference (content_discovery.py); it is this
+    node that recognises that and hands it to the Binary Analysis Agent (acquisition.py +
+    discovered_artifact.py), via the same shared task ledger every other agent task uses."""
+    from app.adapters.authorisation_grants import headers_for_url
+    from app.agents.binary_analysis.acquisition import acquire_binary
+    from app.agents.binary_analysis.discovered_artifact import analyse_discovered_binary
+    from app.agents.binary_analysis.findings import findings_from_weaknesses
+    from app.core.schemas import AgentTask
+
+    assessment_id = state["assessment_id"]
+    policy = state["policy"]
+    graph = state.get("network_graph")
+    web_result = state.get("web_agent_result")
+    references = list(web_result.discovered_binary_references) if web_result else []
+
+    if not references:
+        return {}
+    if not policy.allow_binary_analysis:
+        logger.info("handle_discovered_binaries: %d binary reference(s) reported but allow_binary_analysis is "
+                   "disabled; no task created", len(references))
+        return {"errors": state.get("errors", []) + [
+            f"handle_discovered_binaries: {len(references)} binary reference(s) reported by content discovery "
+            "but allow_binary_analysis is disabled -- no analysis attempted"]}
+
+    guard = ScopeGuard(policy, graph)
+    output_dir = Path(settings.evidence_dir) / assessment_id / "discovered_binaries"
+    assets_by_id = {a.asset_id: a for a in graph.assets} if graph else {}
+
+    all_findings: list[Finding] = []
+    all_evidence: list[Evidence] = []
+    all_tool_executions: list[dict] = []
+    all_errors: list[str] = []
+
+    for i, ref in enumerate(references):
+        asset_id, url = ref["asset_id"], ref["url"]
+        task_id = f"TASK-{AgentId.BINARY_ANALYSIS.value}-discovered-{assessment_id}-{i}"
+        input_data = {"source_url": url, "asset_id": asset_id, "reason": ref.get("reason")}
+
+        def _task(status: TaskStatus, *, error: str | None = None, started: bool = False) -> None:
+            with session_scope() as db:
+                repository.upsert_agent_task(db, AgentTask(
+                    task_id=task_id, assessment_id=assessment_id, agent_id=AgentId.BINARY_ANALYSIS,
+                    task_type="binary_analysis_triggered_by_web_discovery", input_data=input_data, status=status,
+                    error_message=error, started_at=_now() if started else None,
+                    completed_at=_now() if status in (TaskStatus.COMPLETED, TaskStatus.FAILED) else None,
+                ))
+
+        _task(TaskStatus.RUNNING, started=True)
+        try:
+            acquired = acquire_binary(url, asset_id=asset_id, scope_guard=guard, output_dir=output_dir,
+                                      extra_headers=headers_for_url(url, settings.authorisations_path))
+        except (ScopeViolationError, ToolExecutionError) as exc:
+            all_errors.append(f"acquire({url}): {exc}")
+            _task(TaskStatus.FAILED, error=str(exc))
+            continue
+        all_tool_executions.append({"tool": "binary_analysis_agent", "op": "acquire", "target": url,
+                                    "sha256": acquired.sha256, "byte_count": acquired.byte_count})
+
+        asset = assets_by_id.get(asset_id)
+        correlation_terms = tuple(sorted(
+            ({str(s.port) for s in asset.services} if asset else set())
+            | ({s.service_name for s in asset.services if s.service_name} if asset else set())
+            | ({asset.hostname} if asset and asset.hostname else set())
+        ))
+        analysis = analyse_discovered_binary(acquired, output_dir=output_dir, correlation_terms=correlation_terms)
+        all_tool_executions.append({
+            "tool": "binary_analysis_agent", "op": "static_analysis", "target": url,
+            "analysis_depth": analysis.analysis_depth, "incomplete": analysis.incomplete,
+        })
+        all_errors.extend(f"analyse({url}): {e}" for e in analysis.errors)
+
+        binary_id = f"BINARY-DISCOVERED-{acquired.sha256[:12]}"
+        findings, evidence = findings_from_weaknesses(
+            analysis.weaknesses, assessment_id=assessment_id, binary_id=binary_id,
+            source_tool="binary_analysis_agent(discovered_artifact)",
+        )
+        all_findings.extend(findings)
+        all_evidence.extend(evidence)
+
+        # A verified credential finding gets its OWN task, blocked until a person approves it -- discovering
+        # a credential never grants permission to use it (point D.5). Nothing published here (task, event,
+        # finding, evidence) carries the value itself, only the protected-storage reference.
+        for rc in analysis.recovered_credentials:
+            access_task_id = f"TASK-authorised_credential_access-{assessment_id}-{rc['credential_ref']}"
+            with session_scope() as db:
+                repository.upsert_agent_task(db, AgentTask(
+                    task_id=access_task_id, assessment_id=assessment_id, agent_id=AgentId.BINARY_ANALYSIS,
+                    task_type="authorised_credential_access",
+                    input_data={"credential_ref": rc["credential_ref"], "source_binary_sha256": acquired.sha256,
+                               "source_url": url, "function_name": rc["function_name"],
+                               "confidence": rc["confidence"]},
+                    status=TaskStatus.BLOCKED,
+                ))
+                repository.log_event(
+                    db, assessment_id, AgentId.BINARY_ANALYSIS.value,
+                    f"credential recovered and stored ({rc['credential_ref']}); use is blocked pending "
+                    "separate authorisation -- see task " + access_task_id,
+                )
+        _task(TaskStatus.FAILED if analysis.incomplete else TaskStatus.COMPLETED,
+              error="; ".join(analysis.errors) or None)
+
+    with session_scope() as db:
+        for record in guard.audit_log:
+            repository.store_tool_invocation_log(db, assessment_id, "scope_guard", record)
+
+    result = AgentResult(
+        agent_id=AgentId.BINARY_ANALYSIS, assessment_id=assessment_id,
+        execution_status=TaskStatus.COMPLETED if (all_findings or not all_errors) else TaskStatus.FAILED,
+        findings=all_findings, evidence=all_evidence, tool_executions=all_tool_executions, errors=all_errors,
+    )
+    return {"triggered_binary_agent_result": result}
+
+
+# ---------------------------------------------------------------------------
+# 8b. execute_authorised_credential_access
+# ---------------------------------------------------------------------------
+
+
+def execute_authorised_credential_access(
+    assessment_id: str, credential_ref: str, *, asset_id: str, service_id: str, host: str, port: int,
+    guard: ScopeGuard, operator_instruction: str,
+) -> AgentResult:
+    """Transitions a BLOCKED `authorised_credential_access` task to an approved, executing state on a
+    recorded operator approval, retrieves the credential strictly via its protected-storage reference, and
+    makes exactly one authentication attempt against the evidenced service. Never called automatically —
+    only in direct response to an explicit, recorded instruction naming this credential_ref and target."""
+    from app.core.protected_storage import get_provenance, retrieve_secret
+    from app.core.schemas import AgentTask
+
+    access_task_id = f"TASK-authorised_credential_access-{assessment_id}-{credential_ref}"
+    provenance = get_provenance(credential_ref)
+
+    with session_scope() as db:
+        repository.upsert_agent_task(db, AgentTask(
+            task_id=access_task_id, assessment_id=assessment_id, agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE,
+            task_type="authorised_credential_access",
+            input_data={"credential_ref": credential_ref, "service_id": service_id, "asset_id": asset_id,
+                       "source_binary_sha256": provenance.get("source_binary_sha256")},
+            status=TaskStatus.RUNNING, started_at=_now(),
+        ))
+        repository.log_event(
+            db, assessment_id, AgentId.HIDDEN_SERVICES_DETECTIVE.value,
+            f"operator approval recorded for {access_task_id}: credential_ref={credential_ref} "
+            f"evidence=source_binary_sha256:{provenance.get('source_binary_sha256')} target={service_id} "
+            f"scope=192.168.60.0/24 instruction={operator_instruction!r}",
+        )
+
+    secret = retrieve_secret(credential_ref)
+    auth_result = attempt_single_credential_verification(
+        host, port, secret, asset_id=asset_id, service_id=service_id, scope_guard=guard,
+    )
+    del secret
+
+    finding = Finding(
+        finding_id=f"FINDING-credential-access-{credential_ref}",
+        assessment_id=assessment_id, agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE, surface=Surface.NETWORK,
+        asset_id=asset_id, service_id=service_id,
+        title="Authorised single-credential verification attempt",
+        description=(
+            f"One authentication attempt was made against {service_id} using the credential recovered as "
+            f"{credential_ref}. Outcome: {auth_result.outcome}."
+            + (f" Error: {auth_result.error}" if auth_result.error else "")
+        ),
+        severity=Severity.INFO, confidence=Confidence.HIGH, status=FindingStatus.CONFIRMED,
+        verification_required=False, ptes_phase=PtesPhase.EXPLOITATION,
+        detection_method="single_credential_verification",
+    )
+    evidence = Evidence(
+        evidence_id=f"EVIDENCE-credential-access-{credential_ref}", finding_id=finding.finding_id,
+        evidence_type="console_auth_attempt", source_tool="network_security_agent(console_auth)",
+        description=f"Raw banner/response from {host}:{port}, {auth_result.duration_seconds:.2f}s round trip.",
+        raw_data={"outcome": auth_result.outcome, "banner": auth_result.banner, "response": auth_result.response,
+                  "credential_bytes_sent": auth_result.credential_bytes_sent, "credential_ref": credential_ref},
+    )
+
+    with session_scope() as db:
+        repository.upsert_agent_task(db, AgentTask(
+            task_id=access_task_id, assessment_id=assessment_id, agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE,
+            task_type="authorised_credential_access",
+            input_data={"credential_ref": credential_ref, "service_id": service_id, "asset_id": asset_id},
+            output_data={"outcome": auth_result.outcome},
+            status=TaskStatus.COMPLETED if auth_result.outcome != "error" else TaskStatus.FAILED,
+            error_message=auth_result.error, completed_at=_now(),
+        ))
+        repository.store_findings(db, [finding], [evidence])
+        for record in guard.audit_log:
+            repository.store_tool_invocation_log(db, assessment_id, "scope_guard", record)
+        repository.log_event(
+            db, assessment_id, AgentId.HIDDEN_SERVICES_DETECTIVE.value,
+            f"credential access attempt completed for {access_task_id}: outcome={auth_result.outcome}",
+        )
+
+    return AgentResult(
+        agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE, assessment_id=assessment_id,
+        execution_status=TaskStatus.COMPLETED if auth_result.outcome != "error" else TaskStatus.FAILED,
+        findings=[finding], evidence=[evidence],
+        tool_executions=[{"tool": "console_auth", "op": "verify", "target": service_id,
+                          "outcome": auth_result.outcome}],
+        errors=[auth_result.error] if auth_result.error else [],
+    )
+
+
+# ---------------------------------------------------------------------------
 # 9. aggregate_findings
 # ---------------------------------------------------------------------------
 
@@ -442,6 +663,11 @@ def aggregate_findings(state: OrchestratorState) -> dict:
     if netvuln_result is not None:
         all_findings.extend(netvuln_result.findings)
         all_evidence.extend(netvuln_result.evidence)
+
+    triggered_binary_result = state.get("triggered_binary_agent_result")
+    if triggered_binary_result is not None:
+        all_findings.extend(triggered_binary_result.findings)
+        all_evidence.extend(triggered_binary_result.evidence)
 
     all_findings.extend(state.get("network_agent_findings", []))
     all_evidence.extend(state.get("network_agent_evidence", []))

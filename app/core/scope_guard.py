@@ -164,6 +164,25 @@ class ScopeGuard:
                         "allow_active_web_verification is disabled by the assessment policy (safe default)")
         return self.check_web_target_in_scope(asset_id, url)
 
+    def check_content_discovery_allowed(self, asset_id: str, url: str) -> ToolInvocationRecord:
+        if not self.policy.allow_content_discovery:
+            self._deny("content_discovery", "fuzz", url,
+                        "allow_content_discovery is disabled by the assessment policy")
+        return self.check_web_target_in_scope(asset_id, url)
+
+    def check_console_auth_allowed(self, asset_id: str, service_id: str) -> ToolInvocationRecord:
+        """Gate for the single-credential verification step. Deliberately its OWN flag, never implied by
+        allow_network_service_assessment: that flag covers read-only protocol checks that send no credential at
+        all, a materially different and lower-risk action than submitting a recovered value."""
+        if not self.policy.allow_single_credential_verification:
+            self._deny("console_auth", "verify", service_id,
+                        "allow_single_credential_verification is disabled by the assessment policy")
+        self.check_asset_in_scope(asset_id)
+        if service_id not in self._known_service_ids:
+            self._deny("console_auth", "verify", service_id,
+                        f"service {service_id!r} is not present in the authorised network graph")
+        return self._allow("console_auth", "verify", service_id)
+
     # -- binary checks --------------------------------------------------------
 
     def check_binary_analysis_allowed(self, binary_path: str) -> ToolInvocationRecord:
@@ -171,6 +190,16 @@ class ScopeGuard:
             self._deny("ghidra", "static_analysis", binary_path,
                         "allow_binary_analysis is disabled by the assessment policy")
         return self._allow("ghidra", "static_analysis", binary_path)
+
+    def check_binary_acquisition_allowed(self, asset_id: str, url: str) -> ToolInvocationRecord:
+        """The Binary Analysis Agent's OWN fetch of a binary it located itself (e.g. a reference the Web Agent
+        reported) -- distinct from organiser-supplied binaries, which never need a network fetch at all. Gated
+        on the same flag as static analysis (there is no point fetching a binary this policy won't let us
+        analyse) and on the same origin approval an ordinary web request would need."""
+        if not self.policy.allow_binary_analysis:
+            self._deny("binary_analysis_agent", "acquire", url,
+                        "allow_binary_analysis is disabled by the assessment policy")
+        return self.check_web_target_in_scope(asset_id, url)
 
     # -- crawl budget -----------------------------------------------------------
 

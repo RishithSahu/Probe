@@ -63,6 +63,10 @@ class TaskStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    # A task that exists and has a result ready (e.g. a recovered credential) but must not proceed without a
+    # person's separate, explicit approval -- distinct from PENDING (which the orchestrator itself may pick
+    # up and run). Nothing transitions a task OUT of this status automatically.
+    BLOCKED = "blocked"
 
 
 class AssessmentStatus(str, enum.Enum):
@@ -87,6 +91,15 @@ class AgentId(str, enum.Enum):
     NETWORK_VULNERABILITY_DETECTIVE = "network_vulnerability_detective"
     WEB_SECURITY = "web_security_agent"
     BINARY_ANALYSIS = "binary_analysis_agent"
+    # Generic, fully autonomous pipeline: bounded content-discovery against
+    # approved web origins -> any binary artifact it turns up is handed to
+    # the Binary Analysis Agent's own pipeline -> if that yields exactly one
+    # high-confidence embedded-credential string, ONE verification attempt
+    # (receive-then-send-once, never a loop) is made against a graph-known
+    # service whose own banner generically invites that style of
+    # authentication. Nothing here is specific to any one challenge/service
+    # name; every step only acts on what the graph/tools themselves report.
+    HIDDEN_SERVICES_DETECTIVE = "hidden_services_detective"
     ORCHESTRATOR = "orchestrator"
 
 
@@ -150,6 +163,25 @@ class AssessmentPolicy(BaseModel):
         "never implied by crawling or passive-analysis permission.",
     )
     allow_binary_analysis: bool = Field(default=False)
+
+    allow_content_discovery: bool = Field(
+        default=False,
+        description="Authorises bounded, generic hidden-path content discovery against approved_web_origins "
+        "(app/agents/web_security/content_discovery.py) -- a baseline-diff wordlist sweep, not a crawl of "
+        "already-linked pages. Independent of allow_web_crawling.",
+    )
+    max_content_discovery_requests: int = Field(
+        default=40, ge=1, le=200, description="Hard cap on requests per origin for content discovery.",
+    )
+    content_discovery_rate_per_second: float = Field(default=2.0, gt=0, le=20)
+    allow_single_credential_verification: bool = Field(
+        default=False,
+        description="Authorises exactly ONE verification attempt, using a single credential value already "
+        "recovered by static analysis of a discovered artifact (never guessed, never brute-forced), against a "
+        "graph-known service whose own banner generically invites that style of authentication "
+        "(app/agents/network_vulnerability/console_auth.py). This never retries and never tries more than one "
+        "candidate value per service.",
+    )
 
     approved_web_origins: list[str] = Field(
         default_factory=list,
@@ -318,6 +350,12 @@ class AgentResult(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     discovered_endpoints: list[str] = Field(default_factory=list, description="Web Agent only.")
+    discovered_binary_references: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Web Agent only: URLs that look like they serve a binary file, reported for the "
+        "Orchestrator to hand to the Binary Analysis Agent. No bytes travel with these -- see "
+        "app/agents/web_security/content_discovery.py and app/agents/binary_analysis/acquisition.py.",
+    )
     tool_executions: list[dict[str, Any]] = Field(
         default_factory=list, description="Audit trail: {tool, args, exit_code, duration_s, ...}"
     )

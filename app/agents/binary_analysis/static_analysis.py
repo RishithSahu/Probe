@@ -31,6 +31,18 @@ _UNSAFE_FUNCTIONS = {
 _SECRET_KEYWORDS = ("password", "passwd", "secret", "api_key", "apikey", "token", "private_key", "aws_secret")
 _SECRET_VALUE_PATTERN = re.compile(r"^(?=.*[A-Za-z])(?=.*[0-9!@#$%^&*]).{8,64}$")
 _HEX_SECRET_PATTERN = re.compile(r"^[0-9a-fA-F]{32,64}$")
+# Generic ELF/PE dynamic-linking metadata that happens to match the secret-SHAPE heuristic above (mixed
+# letters/digits/punctuation) in any binary, on any platform -- a shared-library filename, a loader path, or
+# a symbol-versioning tag is never a credential. Filtered here, not per-target, so it applies uniformly.
+_DYNAMIC_LINKER_NOISE = (
+    re.compile(r"^lib[a-z0-9_.+-]+\.so(\.[0-9]+)*$", re.IGNORECASE),   # libc.so.6, libpthread.so.0, ...
+    re.compile(r"^/lib(64)?/[^\s]+\.so(\.[0-9]+)*$", re.IGNORECASE),  # /lib64/ld-linux-x86-64.so.2, ...
+    re.compile(r"^[A-Z][A-Z0-9_]*_[0-9]+(\.[0-9]+)*$"),                # GLIBC_2.34, CXXABI_1.3, GLIBCXX_3.4.21, ...
+)
+
+
+def _is_dynamic_linker_noise(value: str) -> bool:
+    return any(p.match(value) for p in _DYNAMIC_LINKER_NOISE)
 
 
 @dataclass
@@ -98,6 +110,8 @@ def _check_hardcoded_secrets(ghidra: GhidraAnalysisResult) -> list[Weakness]:
         # High-entropy-looking literal near a plausible secret shape (not a
         # real entropy calculation — just length/charset heuristics — kept
         # deliberately conservative/low-confidence).
+        if _is_dynamic_linker_noise(s.value):
+            continue
         if _HEX_SECRET_PATTERN.match(s.value) or _SECRET_VALUE_PATTERN.match(s.value):
             if len(s.value) >= 8 and not s.value.isalpha() and " " not in s.value:
                 weaknesses.append(

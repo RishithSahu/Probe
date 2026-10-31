@@ -1,0 +1,164 @@
+=== PDF PAGE 1 ===
+PRD: Autonomous Multi-Agent Penetration Testing
+Engine — Problem, Goals and Requirements
+
+30 October 2026 ·
+
+1. Overview and problem statement
+
+Build a system where several agents work together like a red team: they are pointed at a
+hidden network, map its web, network and binary attack surface, find and prove
+weaknesses, and write one report — following the PTES method, with little human help.
+
+The setting. A company network you have never seen. Somewhere on it are web apps,
+servers, open ports and a few binary programs. A real tester spends days on it: recon,
+scanning, finding each weakness, checking it by hand, then writing a report, working through
+the PTES stages (recon, scanning, vulnerability analysis, exploitation, reporting).
+
+The problem. Doing this by hand is slow and easy to get wrong. One engineer looks at one
+surface at a time. The web tester, the network scanner and the binary analyst do not share
+what they find, so the same host gets looked at three times, weaknesses get missed, and
+the full attack path is never seen. The work is hard to repeat and hard to trust.
+
+Your challenge. Build a multi-agent engine that is pointed at a hidden lab network set up by
+the organizers. It discovers everything in scope, splits the work across agents (network
+discovery, web, binary), finds and verifies weaknesses, maps each step to a PTES phase,
+and produces one report with the attack path. Agents share findings so work is not repeated.
+You can choose any approach and any tech stack. You only test inside the scope you are
+given.
+
+2. Goals and non-goals
+
+A good solution runs on its own, covers all three surfaces, proves its findings instead of
+guessing, and never touches anything outside its scope.
+
+Goals
+
+    •​ Discover: find the live hosts, ports and services on the target network.
+
+    •​ Cover all three surfaces: network, web and binaries, not just one.
+
+    •​ Coordinate: agents share findings and hand work to each other.
+
+    •​ Verify: prove a weakness is real, do not just flag it.
+
+    •​ Map to PTES: tag each step with its PTES phase.
+
+    •​ Report: one clear report with the attack path.
+
+    •​ Autonomous: the whole run starts with one command.
+
+Not required
+
+    •​ A polished UI (a simple web page, a notebook or a report file is fine).
+
+    •​ Damaging or taking down targets. You find and prove, you do not destroy.
+
+    •​ Testing anything outside the scope you are given. Out-of-scope is a hard no.
+
+=== PDF PAGE 2 ===
+    •​ Finding brand-new (0-day) bugs. The lab has planted weaknesses to find.
+
+What you will learn: multi-agent design, recon and scanning, the basics of web, network
+and binary testing, the PTES method, and how to verify a finding.
+
+3. Functional requirements
+
+Your engine must turn a hidden network into a list of proven, labelled findings with an attack
+path; the bonus items earn extra points.
+
+Must have
+
+ ID        Feature                          Example
+
+ FR-1     Network discovery: find live hosts,      Scan the given range, list hosts and
+          open ports and services in scope       open ports
+
+ FR-2    Web surface: crawl web apps, list        Find /login and /admin, and a form
+            endpoints, flag common issues            that echoes input
+
+ FR-3      Binary analysis: inspect the given       Spot a hard-coded password or an
+             binaries for weaknesses                unsafe function
+
+ FR-4      Multi-agent coordination: agents share   Discovery agent finds a web port
+             findings so work is not repeated        and hands it to the web agent
+
+ FR-5    Map each step to a PTES phase         Port scan → Intelligence Gathering
+
+ FR-6       Verify a finding, do not just flag it        Confirm a default password works,
+                                           mark it Confirmed
+
+ FR-7    One report with the attack path, a      GET /targets/5/findings
+           simple API or page, and a README
+
+
+
+Bonus (pick any)
+
+ ID          Feature
+
+ B-1         Capture the planted flags on the lab network
+
+ B-2        Chain findings into a full path to a protected "crown jewel" host
+
+ B-3        Suggest a fix for each finding in plain English
+
+ B-4       Add a new agent or check by editing a config file, not code
+
+ B-5          Live dashboard showing each agent working and what it found
+
+=== PDF PAGE 3 ===
+4. Target network, scoring targets and setup
+
+The organizers run a hidden lab network. Each team is given a scope (an IP range and the
+binaries) at kickoff; nothing outside it may be touched. The lab has planted weaknesses and
+flags, which are the ground truth. Teams pick one difficulty tier before starting; hit the Good
+column to qualify and the Great column to stand out.
+
+Difficulty tiers
+
+ Tier          Scale     What it tests                           Score
+                                                                           multiplier
+
+ Recon      A handful   Mostly discovery and web; one surface at a    1.0x
+                  of hosts    time
+
+ Breach      More     A mix of web, network and binary; some       1.3x
+               hosts       chaining needed
+
+ Deep           Full lab     Several hops to reach a protected host        1.6x
+
+
+
+Targets (measured against the planted weaknesses)
+
+ What we       How                       Good         Great
+ measure
+
+ Coverage         Share of planted hosts and services   Over 70%     Over 90%
+                   found
+
+ Findings          Share of planted weaknesses found   Over 60%     Over 85%
+
+ Verified           Share of findings proven, not just      Half of them     All of them
+                     flagged
+
+ False alarms      Share of findings that are not real     Under 30%    Under 10%
+
+ Scope safety      Probes sent outside the given scope   At most one   None
+                                                              stray probe
+
+ Run time         Time for one full autonomous run on   Under 1 hour   Under 20
+                     the tier                                           minutes
+
+ Autonomy       Human steps needed during a run     Starts with    No human
+                                                 one             input at all
+                                           command
+
+=== PDF PAGE 4 ===
+Suggested tools (not mandatory): nmap or masscan for the network; a web crawler such
+as Katana or ZAP; Ghidra, radare2 or angr for binaries; an agent framework such as
+LangGraph or CrewAI, or your own; the PTES guide for the phases.
+
+Must run easily: judges should be able to start it by following the README, pointed at the
+given scope (Docker Compose is a plus).

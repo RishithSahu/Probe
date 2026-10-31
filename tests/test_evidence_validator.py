@@ -48,6 +48,7 @@ def _evidence(evidence_id: str, finding_id: str) -> Evidence:
     return Evidence(
         evidence_id=evidence_id, finding_id=finding_id, evidence_type="http_response",
         source_tool="httpx", description="test evidence",
+        raw_data={"headers": {}, "missing": ["x-frame-options"]},
     )
 
 
@@ -82,9 +83,7 @@ def test_finding_with_no_evidence_refs_flagged_incomplete_but_still_valid():
 
 
 def test_auto_confirm_requires_all_three_conditions():
-    # auto_confirm_eligible only checks that evidence_refs is non-empty, not
-    # that it resolves against real Evidence records (that's
-    # validate_schema_and_evidence_refs's job, exercised separately above).
+    # Promotion also requires a supplied observation owned by the finding.
 
     # Right detection_method + HIGH confidence + has evidence -> promoted.
     eligible = _finding(detection_method="httpx_header_analysis", confidence=Confidence.HIGH, evidence_refs=["EVIDENCE-001"])
@@ -95,7 +94,10 @@ def test_auto_confirm_requires_all_three_conditions():
     # Eligible detection method + HIGH confidence but no evidence -> stays suspected.
     no_evidence = _finding(finding_id="WEB-004", detection_method="httpx_header_analysis", confidence=Confidence.HIGH, evidence_refs=[])
 
-    result = auto_confirm_eligible([eligible, low_confidence, scanner_derived, no_evidence])
+    result = auto_confirm_eligible(
+        [eligible, low_confidence, scanner_derived, no_evidence],
+        evidence=[_evidence("EVIDENCE-001", "WEB-001")],
+    )
     statuses = {f.finding_id: f.status for f in result}
     assert statuses["WEB-001"] == FindingStatus.CONFIRMED
     assert statuses["WEB-002"] == FindingStatus.SUSPECTED
@@ -121,6 +123,7 @@ def test_auto_confirmed_report_only_lists_findings_actually_promoted_this_pass()
     entered the pipeline ALREADY confirmed — mislabelling it as having been
     auto-confirmed by this run. Fixed to compare before/after status."""
     e1 = _evidence("EVIDENCE-001", "WEB-001")
+    e1.raw_data = {"name": "session", "secure": False, "httponly": True}
     e2 = _evidence("EVIDENCE-002", "WEB-002")
 
     newly_promoted = _finding(

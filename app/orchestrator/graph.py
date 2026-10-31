@@ -26,6 +26,7 @@ def build_orchestrator_graph():
     graph.add_node("validate_scope", nodes.validate_scope)
     graph.add_node("create_agent_tasks", nodes.create_agent_tasks)
     graph.add_node("dispatch_specialist_agents", nodes.dispatch_specialist_agents)
+    graph.add_node("handle_discovered_binaries", nodes.handle_discovered_binaries)
     graph.add_node("ingest_network_agent_results", nodes.ingest_network_agent_results)
     graph.add_node("aggregate_findings", nodes.aggregate_findings)
     graph.add_node("validate_evidence", nodes.validate_evidence)
@@ -45,7 +46,10 @@ def build_orchestrator_graph():
     # predecessor concurrently by default.
     graph.add_edge("create_agent_tasks", "dispatch_specialist_agents")
     graph.add_edge("create_agent_tasks", "ingest_network_agent_results")
-    graph.add_edge("dispatch_specialist_agents", "aggregate_findings")
+    # handle_discovered_binaries is sequential after dispatch_specialist_agents (it reads web_agent_result
+    # from state), but its branch still joins aggregate_findings in parallel with ingest_network_agent_results.
+    graph.add_edge("dispatch_specialist_agents", "handle_discovered_binaries")
+    graph.add_edge("handle_discovered_binaries", "aggregate_findings")
     graph.add_edge("ingest_network_agent_results", "aggregate_findings")
 
     graph.add_edge("aggregate_findings", "validate_evidence")

@@ -91,3 +91,32 @@ def test_pdf_and_json_both_generated_with_warning(tmp_path):
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data["data_integrity"]["contains_synthetic_data"] is True
     assert data["data_integrity"]["fixture_tools_used"] == ["zap_passive"]
+
+
+def test_discovered_binary_branch_errors_and_fixture_use_are_visible():
+    result = AgentResult(
+        agent_id=AgentId.BINARY_ANALYSIS, assessment_id="X", execution_status=TaskStatus.FAILED,
+        errors=["Static analysis tool unavailable"],
+        tool_executions=[{"tool": "ghidra", "used_fixture": True}],
+    )
+    report = _build_report_data(_minimal_state(triggered_binary_agent_result=result))
+    assert report["data_integrity"]["fixture_tools_used"] == ["ghidra"]
+    assert any("Static analysis tool unavailable" in item for item in report["incomplete_tasks_and_limitations"])
+    assert report["agent_execution_summary"]["triggered_binary_agent_result"]["status"] == "failed"
+
+
+def test_skipped_agent_cannot_disappear_from_report_when_errors_are_empty():
+    result = AgentResult(
+        agent_id=AgentId.BINARY_ANALYSIS, assessment_id="X", execution_status=TaskStatus.SKIPPED,
+    )
+    report = _build_report_data(_minimal_state(triggered_binary_agent_result=result))
+    assert any("execution status skipped" in item for item in report["incomplete_tasks_and_limitations"])
+
+
+def test_report_surfaces_rejected_and_incomplete_evidence_counts():
+    report = _build_report_data(_minimal_state(
+        validation_report={"invalid_count": 2, "incomplete_evidence": ["F-1"]},
+    ))
+    limitations = report["incomplete_tasks_and_limitations"]
+    assert any("rejected 2 finding(s)" in item for item in limitations)
+    assert any("incomplete for 1 finding(s)" in item for item in limitations)
