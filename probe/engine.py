@@ -30,13 +30,14 @@ frame is judged byte-for-byte by the one guard, and held segments get no deep pr
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import time
 from pathlib import Path
 from typing import Callable
 
 from . import completeness, netutil, planner, report as report_mod
-from .analysis import challenge, classify, correlate, limits, topology
+from .analysis import challenge, classify, correlate, limits, topology, http_metadata
 from .analysis import segments as seg
 from .discovery import tiers
 from .discovery.ingest import Ingest
@@ -682,6 +683,23 @@ class Engine:
         for a, b, kind, evid in topology.build_edges(t.my_ip, self.store.hosts(), found,
                                                    link_subnet=t.my_network, classes=self._classes):
             self.store.add_edge(a, b, kind, evid)
+        for record in self._service_records:
+            data = http_metadata.metadata(record)
+            for resource in data.get("resources") or []:
+                if str(resource.get("status")) != "200" or not resource.get("title"):
+                    continue
+                import hashlib
+                source = f"endpoint:{record['ip']}:{record['port']}/tcp"
+                token = hashlib.sha256((str(resource.get("path"))+str(data.get("authorised_header_test"))).encode()).hexdigest()[:12]
+                application = f"application:{record['ip']}:{record['port']}:{token}"
+                self.store.add_edge(record["ip"],source,"publishes-service","observed TCP endpoint")
+                self.store.add_edge(source,application,"http-application-view",json.dumps({"title":resource["title"],
+                    "path":resource.get("path"),"approved_header_test":data.get("authorised_header_test") == "true"}))
+        for lead in http_metadata.endpoint_leads(self._service_records):
+            if (lead["ip"],lead["port"]) in self.ingest._ports:
+                self.store.add_edge(lead["ip"],f"endpoint:{lead['ip']}:{lead['port']}/tcp","publishes-service","confirmed open reported endpoint")
+            self.store.add_edge(f"endpoint:{lead['source_ip']}:{lead['source_port']}/tcp",
+                                f"endpoint:{lead['ip']}:{lead['port']}/tcp","reported-service-reference",json.dumps(lead))
         self._announce()
         return found
 
@@ -824,7 +842,16 @@ class Engine:
         ever = self._ever_anomalous()
         hints = {ip: (10 if ip in self.priority_addresses else 5 if ip in ever else 1)
                  for ip, c in self._classes.items() if ip in self.priority_addresses or c.roles or ip in ever}
+        from .authorisation import header_test_grant
+        grant = self.store.meta().get("authorisation") or {}
+        header_tests = {}
+        for ip,ports in targets.items():
+            for port in ports:
+                approved = header_test_grant(grant,ip,port)
+                if approved:
+                    header_tests[ip] = approved
         res = nmap_tool.http_inventory(self.scope, targets, budget_s=min(45, max(0, self._remaining() - 20)),
+                                       header_tests=header_tests,
                                        hints=hints, workdir=str((self.report_dir or Path("probe-data")) / "nmap"))
         records = [r for _, rows in res["results"] for r in rows]
         for r in records:
@@ -838,6 +865,25 @@ class Engine:
                                            "notrun": res["notrun"]}
         if res.get("error"):
             self.notes.append(res["error"])
+
+    def _reported_endpoint_inventory(self) -> None:
+        from .analysis.http_metadata import endpoint_leads
+        leads = endpoint_leads(self._service_records)
+        for lead in leads:
+            self.store.add_lead(f"{lead['ip']}:{lead['port']}",json.dumps(lead),"reported-service-endpoint")
+        result = nmap_tool.reported_endpoint_inventory(self.scope,leads,budget_s=30,
+                            workdir=str((self.report_dir or Path("probe-data"))/"nmap"))
+        for _,records in result["results"]:
+            for r in records:
+                if r["ip"] not in self.ingest.ev.visible:
+                    self.ingest.ev.visible[r["ip"]].add("reported-endpoint-connect")
+                self.ingest._touch(r["ip"],method="reported-endpoint-connect")
+                self.ingest._ports[(r["ip"],r["port"])] = None
+                self.ingest._dirty_ports = True
+                self.store.upsert_host(r["ip"],method="reported-endpoint-connect")
+                self.store.upsert_service(r["ip"],r["port"],service=r["service"],banner=r["banner"],scripts=r["scripts"],method="reported-endpoint-connect")
+                self._service_records.append(r)
+        self.coverage["reported_endpoints"] = {"reported":len(leads),"covered":len(result.get("completed",[])),"attempted":len(result["ran"])}
 
     def _t_gateway(self) -> None:
         t = self.transport
@@ -973,7 +1019,11 @@ class Engine:
         def when(cond, yes: str, no: str):
             return lambda e, s: (True, yes) if cond(e, s) else (False, no)
 
-        reg(T("http-inventory", "read HTTP root metadata before slow version detection; no redirects or credentials",
+        reg(T("reported-endpoint-inventory", "verify exact endpoints reported by observed service metadata",
+              self._reported_endpoint_inventory,
+              when(lambda e,s: e.nmap and self.enrich and bool(http_metadata.endpoint_leads(self._service_records)),
+                   "observed service metadata reports additional endpoints", "no attributed endpoint leads")))
+        reg(T("http-inventory", "read HTTP metadata before slow version detection; bounded same-origin redirects, no credentials",
               self._http_inventory,
               when(lambda e, s: e.nmap and self.enrich and s.ports_open > 0 and s.remaining_s > 25,
                    "known open ports may expose topology references", "no open ports, helper unavailable or budget exhausted"),
@@ -1104,6 +1154,7 @@ class Engine:
         self._status("infer")
         self._infer()
         self._step("http-inventory", "http-inventory")
+        self._step("reported-endpoint-inventory", "reported-endpoints")
         self._infer()
         self._followups()
         self.timings["discovery"] = round(time.time() - self._t0, 1)      # everything up to here is discovery proper

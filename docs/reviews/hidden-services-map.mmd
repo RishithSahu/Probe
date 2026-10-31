@@ -1,0 +1,9 @@
+flowchart LR
+  scanner["Probe: authorised 192.168.60.0/24"] --> edge["192.168.60.139:80"]
+  edge -->|ordinary request and redirect| mirror["Public Tiny File Manager mirror"]
+  mirror -->|published operations note| note["Header-dependent access policy reported"]
+  edge -->|explicitly approved forwarding-header test| wiki["Mitigata Hidden Wiki: HTTP 200"]
+  wiki --> infra["Published infrastructure page"]
+  infra -->|reports same-host listener| console["192.168.60.139:8833 — Game Zone"]
+  scanner -->|TCP open; receive-only banner| console
+  console --> gate["Passkey required; authentication not attempted"]

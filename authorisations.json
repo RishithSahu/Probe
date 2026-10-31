@@ -3,7 +3,10 @@
   "grants": [
     {
       "cidr": "192.168.60.0/24",
-      "purposes": ["discovery", "inventory"],
+      "purposes": [
+        "discovery",
+        "inventory"
+      ],
       "authority": "organisers, relayed by the operator in this chat on 2026-10-31",
       "reference": "Phase 2: The original authorised range is 192.168.60.0/24",
       "prefix_evidence": "operator-specified original authorised range; this is an authorisation boundary, not a claim about the physical subnet"
@@ -21,6 +24,27 @@
       "claim": "additional hidden challenge network authorised for discovery and inventory",
       "cidr": null,
       "state": "exact backend prefix and matching range-specific grant required before investigation"
+    }
+  ],
+  "method_grants": [
+    {
+      "id": "proxy-header-readonly-20261031",
+      "method": "read-only-proxy-header-test",
+      "target_ip": "192.168.60.139",
+      "target_port": 80,
+      "header_name": "X-Forwarded-For",
+      "header_value": "192.168.60.1",
+      "max_requests": 12,
+      "authority": "operator, explicit approval in this chat on 2026-10-31",
+      "reference": "Yes\u2014authorise the bounded read-only header test",
+      "evidence": "probe-data/http-network-metadata-20261031/observation.json: published netops-handover.txt",
+      "restrictions": [
+        "GET only",
+        "same exact origin",
+        "no credentials",
+        "no device modification",
+        "no newly authorised ranges"
+      ]
     }
   ]
 }

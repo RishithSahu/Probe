@@ -127,6 +127,16 @@ def parse_xml(xml_text: str) -> list[dict]:
                 continue
             svc = port.find("service")
             scripts = {s.get("id"): (s.get("output") or "").strip() for s in port.findall("script")}
+            inventory = port.find("script[@id='http-inventory']")
+            if inventory is not None:
+                from ..analysis.http_metadata import KEY, xml_value
+                import json
+                scripts[KEY] = json.dumps(xml_value(inventory))
+            greeting = port.find("script[@id='connect-banner']")
+            if greeting is not None:
+                banner = greeting.find("elem[@key='banner']")
+                if banner is not None:
+                    scripts["banner"] = banner.text or ""
             out.append({
                 "ip": addr, "port": int(port.get("portid")), "proto": port.get("protocol", "tcp"),
                 "service": ((svc.get("name") or "unknown") + ("?" if svc.get("method") == "table" and not scripts else "")) if svc is not None else None,
@@ -267,7 +277,12 @@ def _run_generic(nmap: str, args: list[str], host_timeout: int, budget: float, o
     with fence.tool_context():
         try:
             _require_egress()
-            err = subprocess.run(full, capture_output=True, text=True, timeout=budget, creationflags=flags).stderr or ""
+            completed = subprocess.run(full, capture_output=True, text=True, timeout=budget, creationflags=flags)
+            err = completed.stderr or ""
+            if isinstance(completed.stdout, str):
+                Path(outfile + ".console.txt").write_text(completed.stdout, encoding="utf-8")
+            if completed.returncode:
+                err = f"nmap exit {completed.returncode}: " + err
         except subprocess.TimeoutExpired:
             err = "timeout"
         except RuntimeError as exc:
@@ -302,7 +317,8 @@ def _extra_stage(scope: ScopeGuard, ips: list[str], build, parse, *, workers: in
             return ip, None, None
         if not scope.in_scope(ip) or scope.is_held(ip):
             return ip, None, "scope or hold changed before launch"
-        out, _e = _run_generic(nmap, build(ip), host_timeout, min(host_timeout + 8, left),
+        limit = host_timeout(ip) if callable(host_timeout) else host_timeout
+        out, _e = _run_generic(nmap, build(ip), limit, min(limit + 8, left),
                                os.path.join(workdir, f"{tag}-{ip}.xml"))
         return ip, out, _e
 
@@ -322,19 +338,29 @@ def _extra_stage(scope: ScopeGuard, ips: list[str], build, parse, *, workers: in
 
 
 def http_inventory(scope: ScopeGuard, targets: dict[str, list[int]], *, budget_s: float = 45,
-                   hints: dict[str, int] | None = None, workdir: str = "probe-data/nmap") -> dict:
-    """A short, fair first look before slow version probes. No credentials, redirects or path enumeration."""
+                   hints: dict[str, int] | None = None, workdir: str = "probe-data/nmap", trace: bool = False, header_tests: dict | None = None) -> dict:
+    """A short, fair first look before slow version probes. No credentials or path enumeration; redirects stay on the exact same origin."""
     import math
     web = {ip: sorted(set(p for p in ports if p in FAST_PORTS and
            (p in {80, 81, 443, 591, 3000, 5000, 5001, 7070, 8443, 8888, 9000, 9090} or 8000 <= p <= 8100)))
            for ip, ports in targets.items()}
     web = {ip: ports for ip, ports in web.items() if ports and scope.in_scope(ip) and not scope.is_held(ip)}
     order = sorted(web, key=lambda ip: (-(hints or {}).get(ip, 0), int(ipaddress.ip_address(ip))))
-    ht = max(4, min(12, int(budget_s / max(1, math.ceil(len(order) / 8))) - 1))
+    ht = max(4, min(20, int(budget_s / max(1, math.ceil(len(order) / 8))) - 1))
+    def timeout_for(ip):
+        return max(ht, 20) if (hints or {}).get(ip, 0) >= 5 else ht
     def build(ip):
-        return ["-sT", "-Pn", "-n", "--max-retries", "1", "--script-timeout", f"{max(2,ht-1)}s",
-                "--script", HTTP_INVENTORY, "-p", ",".join(map(str, web[ip])), ip]
-    return _extra_stage(scope, order, build, parse_xml, workers=8, budget=budget_s, host_timeout=ht,
+        script_args = f"http-inventory.budget-ms={max(1000,(timeout_for(ip)-3)*1000)}"
+        g = (header_tests or {}).get(ip)
+        if g:
+            if g["target_ip"] != ip or g["target_port"] not in web[ip]:
+                raise ValueError("header-test grant does not match the known endpoint")
+            value = str(ipaddress.IPv4Address(g["header_value"]))
+            script_args += f",http-inventory.forwarded-for={value},http-inventory.header-port={g['target_port']},http-inventory.max-resources={g['max_requests']}"
+        return (["--packet-trace", "--reason"] if trace else []) + ["-sT", "-Pn", "-n", "--max-retries", "1", "--script-timeout", f"{max(2,timeout_for(ip)-1)}s",
+                "--script", HTTP_INVENTORY, "--script-args", script_args,
+                "-p", ",".join(map(str, web[ip])), ip]
+    return _extra_stage(scope, order, build, parse_xml, workers=8, budget=budget_s, host_timeout=timeout_for,
                         workdir=workdir, tag="http-inventory", caller="nmap-http-inventory")
 
 
@@ -432,3 +458,17 @@ def enrich(scope: ScopeGuard, targets: dict[str, list[int]], *, my_ip: str | Non
             "vulnerable_apps": find_vulnerable_apps(records),
             "hosts": {k: v for k, v in hostinfo.items() if k in ok}, "seconds": round(time.time() - t0, 1),
             "error": "; ".join(errors) or None}
+
+
+def reported_endpoint_inventory(scope, candidates, *, budget_s=30, workdir="probe-data/nmap"):
+    """Verify only attributed, in-scope endpoint leads; read banners without authentication or payloads."""
+    targets = {}
+    for c in candidates[:32]:
+        if scope.in_scope(c["ip"]) and not scope.is_held(c["ip"]) and 1 <= c["port"] <= 65535:
+            targets.setdefault(c["ip"],set()).add(c["port"])
+    script = str(Path(__file__).with_name("connect-banner.nse").resolve())
+    def build(ip):
+        return ["-sT","-Pn","-n","--max-retries","1","--script",script,"--script-timeout","5s",
+                "-p", ",".join(map(str,sorted(targets[ip]))),ip]
+    return _extra_stage(scope,list(targets),build,parse_xml,workers=4,budget=budget_s,host_timeout=12,
+                        workdir=workdir,tag="reported-endpoints",caller="reported-endpoint-inventory")

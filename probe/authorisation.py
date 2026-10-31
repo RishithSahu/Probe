@@ -31,4 +31,18 @@ def verify(path: Path, cidrs) -> dict:
             raise ValueError(f"{n} has no explicit discovery/inventory grant in {path}")
     return {"path": str(Path(path).resolve()), "scope_digest": scope_digest(requested),
             "scope": [str(n) for n in requested], "grants": data["grants"],
-            "leads": data.get("leads", []), "pending": data.get("pending", [])}
+            "leads": data.get("leads", []), "pending": data.get("pending", []),
+            "method_grants": data.get("method_grants", [])}
+
+
+def header_test_grant(snapshot: dict, ip: str, port: int) -> dict | None:
+    for g in snapshot.get("method_grants", []):
+        if g.get("method") != "read-only-proxy-header-test" or g.get("target_ip") != ip or g.get("target_port") != port:
+            continue
+        if not g.get("authority") or not g.get("reference") or g.get("header_name") != "X-Forwarded-For":
+            raise ValueError("proxy-header test lacks an explicit scoped grant")
+        value = str(ipaddress.IPv4Address(g["header_value"]))
+        if not (1 <= g.get("max_requests", 0) <= 12):
+            raise ValueError("proxy-header test request bound is invalid")
+        return {**g, "header_value": value}
+    return None

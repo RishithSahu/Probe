@@ -204,6 +204,12 @@ def _print_result(store, transport, scope, attestation=None, engine=None) -> Non
     sys.stdout.flush()
 
 
+def reset_scan_inventory(store, grant) -> None:
+    """Clear current observations, then attach the independently verified startup grant snapshot."""
+    store.reset()
+    store.set_meta("authorisation", grant)
+
+
 def _run(args) -> int:
     startup_t0 = time.monotonic()
     scope_cidrs = resolve_scope(args)
@@ -345,7 +351,7 @@ def _run(args) -> int:
 
     def do_scan() -> Engine:
         state["running"] = True
-        store.reset()                             # inventory only: claims, events and scan history survive
+        reset_scan_inventory(store, grant)         # retain the verified grants while clearing current observations
         transport.sent.clear()
         transport.set_rate(args.rate or 2500)
         engine = Engine(scope, store, transport, budget_s=args.budget, tcp_ports=args.ports, rate_pps=args.rate, max_hops=args.max_hops,

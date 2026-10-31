@@ -55,4 +55,16 @@ def collect(hosts, ev, env, routes=()) -> list[dict]:
         add("observed-or-referenced-address", "capture-or-service-metadata", sorted(reasons), address=address,
             state="unverified" if all("service output" in x for x in reasons) else "observed",
             proves="address only; no subnet prefix")
+    from .http_metadata import metadata, endpoint_leads
+    records = [{"ip":h["ip"],**p} for h in hosts for p in h.get("open_ports",[])]
+    for record in records:
+        data = metadata(record)
+        for resource in data.get("resources") or []:
+            if str(resource.get("status")) == "200" and resource.get("title"):
+                add("http-application-view",f"{record['ip']}:{record['port']}{resource.get('path','')}",
+                    resource.get("page_text"),address=record["ip"],state="observed",
+                    title=resource["title"],approved_header_test=data.get("authorised_header_test") == "true")
+    for lead in endpoint_leads(records):
+        add("reported-service-endpoint",f"{lead['source_ip']}:{lead['source_port']}{lead['source_path']}",
+            lead["evidence"],address=lead["ip"],port=lead["port"],state="reported",proves=lead["basis"])
     return list({f['id']: f for f in facts}.values())
