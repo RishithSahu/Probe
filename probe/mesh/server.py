@@ -37,8 +37,11 @@ def dispatch(hub: Hub, svc: ProbeService, method: str, path: str, q: dict, body:
             if path == "/mesh/fail":
                 return 200, hub.fail(body["agent_id"], body["key"], body.get("error", ""), body["lease_token"])
             if path == "/mesh/plan":
-                return 200, hub.plan(scope=body.get("scope"), shard_size=int(body.get("shard_size", 256)),
-                                     enrich=bool(body.get("enrich", True)), force=bool(body.get("force", False)))
+                return 200, hub.plan(
+                    scope=body.get("scope"),
+                    shard_size=int(body["shard_size"]) if body.get("shard_size") is not None else None,
+                    worker_count=int(body["worker_count"]) if body.get("worker_count") is not None else None,
+                    enrich=bool(body.get("enrich", True)), force=bool(body.get("force", False)))
             if path == "/mesh/approve":
                 return 200, hub.approve(body["cidr"])
             if path == "/api/claim":

@@ -51,6 +51,24 @@ def split_scope(cidrs: list[str], shard_size: int = 256) -> list[str]:
     return out
 
 
+def shard_size_for_workers(cidrs: list[str], worker_count: int, *, min_shard_size: int = 4) -> int:
+    """Derive a shard address-count from the scope's own size and how many workers are available, instead
+    of a fixed /24-style default -- so two workers get two disjoint shards from whatever the scope is
+    (e.g. two /25s from a /24), four get four, and so on, computed from the input rather than hardcoded.
+    `split_scope` itself already rounds whatever size it is given down to the nearest power of two and
+    produces an EXACT, disjoint, covering decomposition (see its own docstring) -- nothing about that needs
+    to change; this only decides WHAT size to ask it for.
+
+    A worker pool much larger than a small scope must not explode it into one job per address: the result
+    is never smaller than `min_shard_size` (the same floor split_scope itself already enforces), so a /30
+    scope with 100 workers still yields one sensible shard, not a thousand single-address tasks."""
+    nets = [ipaddress.ip_network(c, strict=False) for c in cidrs]
+    total = sum(n.num_addresses for n in nets if n.version == 4)
+    if total <= 0 or worker_count <= 1:
+        return max(min_shard_size, total or min_shard_size)
+    return max(min_shard_size, total // worker_count)
+
+
 def _nets(cidrs) -> list[ipaddress.IPv4Network]:
     return [ipaddress.ip_network(c, strict=False) for c in cidrs]
 
@@ -229,12 +247,18 @@ class Hub:
     def active(self) -> bool:
         return bool(self.store.query("SELECT 1 FROM tasks WHERE status IN ('pending','leased') LIMIT 1"))
 
-    def plan(self, *, scope: list[str] | None = None, shard_size: int = 256, enrich: bool = True, force: bool = False) -> dict:
+    def plan(self, *, scope: list[str] | None = None, shard_size: int | None = None, worker_count: int | None = None,
+            enrich: bool = True, force: bool = False) -> dict:
         if self.active() and not force:
             raise MeshError(409, "a plan is still running")
         scope = scope or self.scope
         if not scope:
             raise MeshError(400, "no scope to plan")
+        # worker_count derives a shard size from the scope's own address count (see shard_size_for_workers);
+        # an explicit shard_size always wins when given, and the historical default of 256 applies only
+        # when NEITHER is given, so existing callers that pass neither keep their existing behaviour exactly.
+        if shard_size is None:
+            shard_size = shard_size_for_workers(scope, worker_count) if worker_count else 256
         shards = split_scope(scope, shard_size)
         self.store.exec("DELETE FROM tasks")
         self.store.reset()                                   # the merged inventory is rebuilt; ledger/events/agents survive

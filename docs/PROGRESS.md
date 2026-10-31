@@ -791,8 +791,33 @@ the authorised `NetworkGraph`.
   counter confirms 4 invocations, not more. Full suite: **476 passed,
   4 skipped**.
 
-  **Still not done**: item 2 (configurable partitioning by worker
-  count), and everything else items 5-14 list (multi-worker pools,
-  resource limits, PostgreSQL, the generic evidence-graph model, the
-  multi-worker CLI, the remaining concurrency tests, and the
-  load/scaling demonstration).
+  **Item 2 — configurable scope partitioning by worker count, done
+  right after this entry's items 3/4**: added
+  `shard_size_for_workers(cidrs, worker_count)` (`probe/mesh/core.py`) --
+  derives a shard address-count from the scope's own size and the
+  worker count (`total_addresses // worker_count`, floored at 4), then
+  hands that to the EXISTING `split_scope()` unchanged, which already
+  rounds down to a power of two and produces an exact, disjoint,
+  covering decomposition (nothing about that logic needed to change;
+  only what size to ask it for). `Hub.plan()` gained a `worker_count`
+  parameter alongside the existing `shard_size` (an explicit
+  `shard_size` always wins; neither given keeps the historical
+  default of 256 exactly as before); threaded through
+  `probe/mesh/server.py`'s `/mesh/plan` dispatch. Verified
+  (`tests/test_mesh_partitioning.py`, 17 tests) against the request's
+  own worked examples: 2 workers on a `/24` -> exactly
+  `10.20.30.0/25` + `10.20.30.128/25`; 4 workers -> exactly four `/26`s;
+  8 workers -> eight `/27`s; a parametrised disjoint+exact-coverage
+  check across worker counts 1/2/3/4/5/7/8/16/32 (every address in the
+  original scope ends up in exactly one shard, every shard stays
+  inside the authorised scope); a `/30` scope with 500 requested
+  workers still yields at most 4 shards, never one job per address;
+  an explicit `shard_size` overriding `worker_count` when both are
+  given. Full suite: **493 passed, 4 skipped**.
+
+  **Still not done**: items 5-14 (multi-worker pools actually dispatching
+  through `probe/mesh/worker.py` at scale, resource limits, subprocess
+  cancellation, PostgreSQL, the generic evidence-graph model, the
+  `--probe-workers/--web-workers/...` one-command CLI, the remaining
+  concurrency tests, and the load/scaling demonstration across
+  1/2/4/8+ workers).
