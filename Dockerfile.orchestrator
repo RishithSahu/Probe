@@ -3,6 +3,12 @@
 # APE_WEB_AGENT_SERVICE_URL / APE_BINARY_AGENT_SERVICE_URL are unset) the
 # Web/Binary agent code in-process. No pentest tooling (Katana/ZAP/Ghidra)
 # lives in this image — see Dockerfile.web / Dockerfile.binary for those.
+#
+# Includes probe/ (source only, not installed as a package) because
+# app.adapters.network_graph_adapter.ProbeAPISource imports
+# probe.client.ProbeClient at runtime — stdlib-only, so this needs none of
+# the scapy/Npcap/libpcap stack requirements-probe.txt adds for actually
+# RUNNING Probe (which happens on a separate host, not in this container).
 FROM python:3.12-slim
 
 WORKDIR /srv/app
@@ -22,6 +28,7 @@ COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
 COPY app ./app
+COPY probe ./probe
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts

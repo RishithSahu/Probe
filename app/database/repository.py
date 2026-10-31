@@ -15,6 +15,7 @@ from app.core.schemas import (
     AssessmentPolicy,
     AssessmentStatus,
     BinaryAsset,
+    DiscoverySource,
     Evidence,
     Finding,
     AgentTask,
@@ -94,6 +95,16 @@ def store_network_graph(db: Session, assessment_id: str, graph: NetworkGraph) ->
         )
     )
 
+    # Every asset in one NetworkGraph shares the same origin — the graph's
+    # own `generated_by`, not a per-asset field (NetworkGraphAssetRecord
+    # carries no discovery_source of its own). Falls back to GRAPH_IMPORT
+    # for a generated_by value that isn't a known DiscoverySource (e.g. a
+    # provisional file export's custom string).
+    try:
+        discovery_source = DiscoverySource(graph.generated_by).value
+    except ValueError:
+        discovery_source = DiscoverySource.GRAPH_IMPORT.value
+
     # Also populate normalised Asset/Service rows for direct querying
     # (findings join against these by original asset_id/service_id).
     for asset in graph.assets:
@@ -103,7 +114,7 @@ def store_network_graph(db: Session, assessment_id: str, graph: NetworkGraph) ->
             ip=asset.ip,
             hostname=asset.hostname,
             asset_type=asset.asset_type,
-            discovery_source=asset.discovery_source.value,
+            discovery_source=discovery_source,
         )
         db.add(asset_record)
         db.flush()

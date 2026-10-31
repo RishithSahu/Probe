@@ -12,7 +12,7 @@ import enum
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 SCHEMA_VERSION = "1.0.0"
 
@@ -74,7 +74,17 @@ class AssessmentStatus(str, enum.Enum):
 
 
 class AgentId(str, enum.Enum):
-    NETWORK_VULNERABILITY = "network_vulnerability_agent"  # teammate's component
+    # External: a separate, deeper Network Vulnerability Assessment Agent
+    # integrated via POST /external-findings, and Probe's own lightweight
+    # leads() signal (app/adapters/probe_leads.py) — neither is this
+    # project's own code.
+    NETWORK_VULNERABILITY = "network_vulnerability_agent"
+    # This project's own agent (app/agents/network_vulnerability/): safe,
+    # read-only protocol probes against services already in the graph.
+    # Kept as a distinct identity from NETWORK_VULNERABILITY above so task
+    # tracking/findings provenance never conflates "externally supplied"
+    # with "this app's own checks" — they have different trust levels.
+    NETWORK_VULNERABILITY_DETECTIVE = "network_vulnerability_detective"
     WEB_SECURITY = "web_security_agent"
     BINARY_ANALYSIS = "binary_analysis_agent"
     ORCHESTRATOR = "orchestrator"
@@ -117,7 +127,16 @@ class AssessmentPolicy(BaseModel):
         default=False, description="Authorisation for the external network probe only; unused here."
     )
     allow_network_service_assessment: bool = Field(
-        default=False, description="Authorises the external Network Vulnerability Agent's checks."
+        default=False,
+        description="Authorises the Network Vulnerability Detective's read-only protocol checks "
+        "(app/agents/network_vulnerability/) against already-discovered services, and a separate, "
+        "deeper external Network Vulnerability Agent's checks, should one be integrated.",
+    )
+    allow_ftp_anonymous_check: bool = Field(
+        default=False,
+        description="A single, well-known, non-invasive FTP login attempt using the 'anonymous' account "
+        "specifically to test whether that FTP feature is enabled — not password guessing against an "
+        "arbitrary account. Requires allow_network_service_assessment too; off by default.",
     )
     allow_web_crawling: bool = Field(
         default=False, description="Authorises Katana endpoint discovery against approved origins."
@@ -256,10 +275,20 @@ class Finding(BaseModel):
         default=True, description="True until evidence_validator has confirmed or rejected this finding."
     )
 
-    @field_validator("asset_id", "binary_id")
-    @classmethod
-    def _at_most_one_target(cls, v: str | None, info) -> str | None:  # noqa: ANN001
-        return v
+    @model_validator(mode="after")
+    def _at_most_one_target(self) -> "Finding":
+        """A finding is about exactly one network asset OR one binary, never
+        both — this was previously a no-op validator (bug: it took `v` and
+        returned it unchanged, enforcing nothing). Every current producer
+        (Web/Binary/Network-lead findings) already only ever sets one of
+        the two; this makes that an enforced invariant instead of an
+        accidental one."""
+        if self.asset_id and self.binary_id:
+            raise ValueError(
+                f"finding {self.finding_id!r} sets both asset_id ({self.asset_id!r}) and "
+                f"binary_id ({self.binary_id!r}); a finding must reference exactly one target"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +380,10 @@ class ExternalNetworkFinding(BaseModel):
 
 
 class NetworkGraphServiceRecord(BaseModel):
-    """Provisional schema for one service node in the externally-supplied graph.
-    Documented in docs/network_graph_contract.md; see app/adapters/network_graph_adapter.py
-    for tolerant parsing of real-world variations."""
+    """Normalised service record. Covers both the provisional static-file
+    contract and the real Probe API contract (docs/CONTRACT.md); see
+    app/adapters/network_graph_adapter.py for the two source-specific
+    parsers that both produce this same shape."""
 
     service_id: str
     asset_id: str
@@ -361,6 +391,8 @@ class NetworkGraphServiceRecord(BaseModel):
     protocol: str = "tcp"
     service_name: str | None = None
     version: str | None = None
+    product: str | None = Field(default=None, description="From Probe's nmap-derived service.product, when available.")
+    banner: str | None = Field(default=None, description="Raw banner text, when Probe captured one.")
 
 
 class NetworkGraphAssetRecord(BaseModel):
@@ -369,6 +401,15 @@ class NetworkGraphAssetRecord(BaseModel):
     hostname: str | None = None
     asset_type: str = "host"
     services: list[NetworkGraphServiceRecord] = Field(default_factory=list)
+    held: bool = Field(
+        default=False,
+        description="True when Probe found this asset inside a held (hidden, not-yet-approved) segment. "
+        "Must never be offered as a web/binary assessment target regardless of AssessmentPolicy — "
+        "see network_graph_adapter.extract_http_services and ScopeGuard.",
+    )
+    verdict: str | None = Field(
+        default=None, description="Probe's reachability verdict (e.g. CONFIRMED_ONLINK), when sourced from Probe."
+    )
 
 
 class NetworkGraphEdgeRecord(BaseModel):

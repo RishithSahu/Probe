@@ -119,5 +119,15 @@ def run_evidence_validation(findings: list[Finding], evidence: list[Evidence]) -
         raise EvidenceValidationError("all findings failed evidence validation")
 
     promoted = auto_confirm_eligible(report.valid)
-    report.auto_confirmed = [f.finding_id for f in promoted if f.status == FindingStatus.CONFIRMED]
+    # auto_confirmed must mean "this pass promoted it" — not merely "its
+    # status happens to be CONFIRMED now". Every producer starts a finding
+    # `suspected`, so this distinction has no effect today, but comparing
+    # before/after status (rather than just checking the after-state) keeps
+    # this report field honest if that assumption ever stops holding (e.g. a
+    # future caller re-running validation over already-reviewed findings).
+    before_by_id = {f.finding_id: f.status for f in report.valid}
+    report.auto_confirmed = [
+        f.finding_id for f in promoted
+        if f.status == FindingStatus.CONFIRMED and before_by_id.get(f.finding_id) != FindingStatus.CONFIRMED
+    ]
     return promoted, report

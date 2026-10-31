@@ -76,6 +76,32 @@ class Settings(BaseSettings):
     # how to define a stricter one for a hackathon/lab engagement.
     zap_active_scan_policy_name: str = Field(default="Default Policy")
 
+    # --- Network Discovery Probe integration (teammate's component, probe/) ----
+    # Base URL of a running `python -m probe` instance (see docs/CONTRACT.md).
+    # Probe normally runs directly on a host with raw-socket/admin access, not
+    # in a container — when the orchestrator itself runs in Docker, this must
+    # be reachable from inside the container: `http://host.docker.internal:8080`
+    # on Docker Desktop (Windows/Mac), or the host's LAN/bridge IP on Linux.
+    # Set to empty/None to disable the live integration entirely and fall back
+    # to a static network-graph file supplied per-assessment.
+    probe_api_url: str | None = Field(default="http://127.0.0.1:8080")
+    probe_scan_max_age_seconds: float = Field(
+        default=300.0, description="Passed to ProbeClient.ensure_scan(); see app/adapters/network_graph_adapter.py."
+    )
+    probe_ensure_scan_on_load: bool = Field(
+        default=False,
+        description="If true, load_network_graph asks Probe to (re)scan before reading the inventory, "
+        "which can block for minutes on a cold scan. Default false: assumes Probe is already warmed up "
+        "(e.g. run manually, or ensure_scan'd by another agent) so an assessment request never "
+        "unexpectedly triggers new network traffic on its own.",
+    )
+    probe_auto_ingest_leads: bool = Field(
+        default=True,
+        description="When Probe is configured, automatically translate its leads() into network-surface "
+        "Findings during ingest_network_agent_results, in addition to anything POSTed to "
+        "/external-findings. See app/adapters/probe_leads.py.",
+    )
+
     # --- Safety defaults (overridden per-assessment by AssessmentPolicy) ------
     default_active_web_verification_enabled: bool = Field(default=False)
 

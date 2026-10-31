@@ -160,7 +160,14 @@ def identify_binary(path: str | Path) -> BinaryMetadata:
         rc, out, err = _run_tool(["readelf", "-h", str(path)])
         if rc == 0:
             meta.__dict__["readelf_header"] = out
-            meta.is_stripped = "no symbols" not in out.lower()  # heuristic, refined below
+            # BUG FIX: this used to also set `meta.is_stripped` from this
+            # same `-h` (ELF *header*) output by checking for the text "no
+            # symbols" — which readelf's header dump never contains, so the
+            # check was vacuously almost-always True. It was overwritten
+            # below by the real `-sW` (symbol table) check in the common
+            # case, but left a wrong `is_stripped=True` behind on the rare
+            # path where `readelf -sW` itself failed. Stripped-ness is only
+            # ever set from the actual symbol-table output now.
         else:
             meta.warnings.append(f"'readelf' unavailable or failed: {err.strip()}")
 

@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from app.core.exceptions import ScopeViolationError
+from app.core.exceptions import DryRunSkipped, ScopeViolationError
 from app.core.schemas import AssessmentPolicy, NetworkGraph
 
 logger = logging.getLogger("ape.scope_guard")
@@ -46,10 +46,18 @@ class ScopeGuard:
         self.policy = policy
         self.graph = graph
         self._known_asset_ids: set[str] = {a.asset_id for a in graph.assets} if graph else set()
+        self._held_asset_ids: set[str] = {a.asset_id for a in graph.assets if a.held} if graph else set()
         self._known_service_ids: set[str] = (
             {s.service_id for a in graph.assets for s in a.services} if graph else set()
         )
-        self._approved_asset_ids: set[str] = set(policy.approved_asset_ids) or self._known_asset_ids
+        # Default (no explicit approved_asset_ids): every known asset EXCEPT
+        # held ones — a Probe-flagged held/hidden segment must never be in
+        # scope by mere omission. See check_asset_in_scope below for the
+        # unconditional held check that applies even when an operator *does*
+        # list a held asset_id explicitly (a mistake we refuse, not honour).
+        self._approved_asset_ids: set[str] = set(policy.approved_asset_ids) or (
+            self._known_asset_ids - self._held_asset_ids
+        )
         self._approved_origins = {self._normalise_origin(o) for o in policy.approved_web_origins}
         self.audit_log: list[ToolInvocationRecord] = []
 
@@ -80,11 +88,32 @@ class ScopeGuard:
         raise ScopeViolationError(reason)
 
     def _allow(self, tool: str, operation: str, target: str, reason: str = "authorised") -> ToolInvocationRecord:
-        return self._record(tool, operation, target, allowed=True, reason=reason)
+        rec = self._record(tool, operation, target, allowed=True, reason=reason)
+        # BUG FIX: AssessmentPolicy.dry_run was documented ("the Scope Guard
+        # logs intended tool invocations without executing them") and
+        # defaulted to True, but nothing actually enforced it anywhere —
+        # every check_*_allowed() call simply returned and the caller went
+        # on to make the real httpx/subprocess/API call regardless. This is
+        # the single choke point every one of those checks funnels through,
+        # so it is also the single place dry_run needs to be enforced.
+        if self.policy.dry_run:
+            raise DryRunSkipped(
+                f"dry_run is enabled: {tool} {operation} against {target!r} was authorised "
+                f"({reason}) but not executed"
+            )
+        return rec
 
     # -- network / service checks --------------------------------------------
 
     def check_asset_in_scope(self, asset_id: str) -> None:
+        # Unconditional, even if an operator explicitly listed this asset_id
+        # in approved_asset_ids: a Probe-held (hidden, not-yet-owner-approved)
+        # segment is never in scope from this side. The only way in is for
+        # the network owner to run `python -m probe approve <cidr>`, which
+        # clears `held` on Probe's own side before the next graph load.
+        if asset_id in self._held_asset_ids:
+            self._deny("scope_guard", "asset_check", asset_id,
+                        f"asset {asset_id!r} is inside a held segment (pending network-owner approval via Probe)")
         if asset_id not in self._approved_asset_ids:
             self._deny("scope_guard", "asset_check", asset_id, f"asset {asset_id!r} is not in the approved assessment scope")
 

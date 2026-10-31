@@ -16,10 +16,14 @@ from pathlib import Path
 from app.adapters.external_network_agent import to_findings, validate_external_findings
 from app.adapters.network_graph_adapter import (
     JSONFileNetworkGraphSource,
+    ProbeAPISource,
     extract_http_services,
     load_network_graph as adapter_load_network_graph,
+    normalise_probe_graph,
 )
+from app.adapters.probe_leads import findings_from_probe_leads
 from app.agents.binary_analysis.agent import run_binary_analysis_agent
+from app.agents.network_vulnerability.agent import run_network_vulnerability_agent
 from app.agents.web_security.agent import WebTarget, run_web_security_agent
 from app.analysis.attack_paths import build_attack_path_graph
 from app.analysis.evidence_validator import run_evidence_validation
@@ -68,22 +72,43 @@ def validate_assessment(state: OrchestratorState) -> dict:
 
 
 def load_network_graph(state: OrchestratorState) -> dict:
-    """Loads the already-completed graph from disk via the Network Graph
-    Adapter. This node (and nothing downstream of it) performs no discovery
-    of its own — see docs/network_graph_contract.md for the integration
-    boundary with the teammate's probe."""
+    """Loads the already-completed inventory. Two sources, both read-only —
+    neither this node nor anything downstream of it performs discovery:
+
+    1. A static JSON file (`network_graph_source_path`), when the request
+       supplied one — the original provisional contract, still useful for
+       offline work, synthetic fixtures, and an exported snapshot.
+    2. The live Network Discovery Probe API (`settings.probe_api_url`),
+       otherwise — the real integration, per docs/CONTRACT.md. Falls back
+       here automatically so an assessment created without an explicit file
+       path still gets an inventory when Probe is reachable.
+    """
+    assessment_id = state["assessment_id"]
     source_path = state.get("network_graph_source_path")
-    if not source_path:
-        return {"errors": state.get("errors", []) + ["load_network_graph: no network_graph_source_path supplied"]}
 
     try:
-        graph = adapter_load_network_graph(JSONFileNetworkGraphSource(source_path), raw_source_ref=source_path)
+        if source_path:
+            graph = adapter_load_network_graph(JSONFileNetworkGraphSource(source_path), raw_source_ref=source_path)
+            source_desc = f"file {source_path}"
+        elif settings.probe_api_url:
+            graph = adapter_load_network_graph(
+                ProbeAPISource(ensure_scan=settings.probe_ensure_scan_on_load),
+                raw_source_ref=settings.probe_api_url,
+                normaliser=normalise_probe_graph,
+                scope_id=state["scope_id"],
+            )
+            source_desc = f"Probe API at {settings.probe_api_url}"
+        else:
+            return {
+                "errors": state.get("errors", [])
+                + ["load_network_graph: no network_graph_source_path supplied and APE_PROBE_API_URL is unset"]
+            }
     except GraphValidationError as exc:
         return {"errors": state.get("errors", []) + [f"load_network_graph: {exc}"]}
 
     with session_scope() as db:
-        repository.store_network_graph(db, state["assessment_id"], graph)
-        repository.log_event(db, state["assessment_id"], AgentId.ORCHESTRATOR.value, f"loaded network graph from {source_path}")
+        repository.store_network_graph(db, assessment_id, graph)
+        repository.log_event(db, assessment_id, AgentId.ORCHESTRATOR.value, f"loaded network graph from {source_desc}")
 
     return {"network_graph": graph}
 
@@ -162,6 +187,7 @@ def create_agent_tasks(state: OrchestratorState) -> dict:
             (AgentId.WEB_SECURITY, "web_security_assessment", {"targets": state.get("http_targets", [])}),
             (AgentId.BINARY_ANALYSIS, "binary_analysis", {"binaries": state.get("binary_paths", [])}),
             (AgentId.NETWORK_VULNERABILITY, "external_ingestion", {}),
+            (AgentId.NETWORK_VULNERABILITY_DETECTIVE, "network_service_assessment", {}),
         ):
             task_id = f"TASK-{agent_id.value}-{assessment_id}"
             repository.upsert_agent_task(
@@ -222,13 +248,18 @@ def _mark_task(assessment_id: str, agent_id: AgentId, status: TaskStatus, *, err
 
 
 def dispatch_specialist_agents(state: OrchestratorState) -> dict:
-    """Combines PRD nodes `dispatch_web_agent` and `dispatch_binary_agent`
-    into one LangGraph node so they execute concurrently via
+    """Combines the Web, Binary, and Network Vulnerability Detective
+    dispatch into one LangGraph node so all three execute concurrently via
     `run_concurrently` — LangGraph models true node-level parallelism via
-    separate graph branches, but since both tasks here are short-lived and
-    independent, running them inside one node with a thread pool keeps the
-    graph topology simple while still satisfying "Web and Binary agents
-    execute concurrently" (PRD Part 9.3)."""
+    separate graph branches, but since all three tasks here are short-lived
+    and independent, running them inside one node with a thread pool keeps
+    the graph topology simple while still satisfying "agents execute
+    concurrently".
+
+    The Network Vulnerability Detective (app/agents/network_vulnerability/)
+    only assesses services already present in the authorised NetworkGraph —
+    it never performs discovery itself; that remains Probe's job
+    exclusively (see docs/IMPLEMENTATION_STATUS.md, "The Probe conflict")."""
     assessment_id = state["assessment_id"]
     policy = state["policy"]
     graph = state.get("network_graph")
@@ -264,10 +295,32 @@ def dispatch_specialist_agents(state: OrchestratorState) -> dict:
     else:
         _mark_task(assessment_id, AgentId.BINARY_ANALYSIS, TaskStatus.SKIPPED, error="not authorised or no binaries supplied")
 
+    # Network Vulnerability Detective: every (asset, service) pair in the
+    # already-loaded graph — it decides itself which services it has a
+    # check for (see _CHECKED_SERVICE_NAMES) and silently skips the rest;
+    # this is not a second discovery pass, only a filter over what Probe
+    # already reported.
+    netvuln_targets: list[tuple] = []
+    if graph is not None:
+        for asset in graph.assets:
+            for service in asset.services:
+                netvuln_targets.append((asset, service))
+
+    if policy.allow_network_service_assessment and netvuln_targets:
+        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY_DETECTIVE, TaskStatus.RUNNING)
+        jobs[AgentId.NETWORK_VULNERABILITY_DETECTIVE.value] = lambda: run_network_vulnerability_agent(
+            netvuln_targets, assessment_id=assessment_id, scope_guard=guard,
+            allow_ftp_anonymous_check=policy.allow_ftp_anonymous_check,
+        )
+    else:
+        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY_DETECTIVE, TaskStatus.SKIPPED,
+                    error="not authorised or no services in the graph")
+
     results = run_concurrently(jobs) if jobs else {}
 
     web_result = results.get(AgentId.WEB_SECURITY.value)
     binary_result = results.get(AgentId.BINARY_ANALYSIS.value)
+    netvuln_result = results.get(AgentId.NETWORK_VULNERABILITY_DETECTIVE.value)
 
     if web_result is not None:
         _mark_task(assessment_id, AgentId.WEB_SECURITY, web_result.execution_status,
@@ -275,6 +328,9 @@ def dispatch_specialist_agents(state: OrchestratorState) -> dict:
     if binary_result is not None:
         _mark_task(assessment_id, AgentId.BINARY_ANALYSIS, binary_result.execution_status,
                     error="; ".join(binary_result.errors) if binary_result.errors else None)
+    if netvuln_result is not None:
+        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY_DETECTIVE, netvuln_result.execution_status,
+                    error="; ".join(netvuln_result.errors) if netvuln_result.errors else None)
 
     # Persist the scope guard's audit trail regardless of outcome — tool
     # invocations (allowed AND denied) must be recorded even for a failed task.
@@ -282,7 +338,10 @@ def dispatch_specialist_agents(state: OrchestratorState) -> dict:
         for record in guard.audit_log:
             repository.store_tool_invocation_log(db, assessment_id, "scope_guard", record)
 
-    return {"web_agent_result": web_result, "binary_agent_result": binary_result}
+    return {
+        "web_agent_result": web_result, "binary_agent_result": binary_result,
+        "network_vulnerability_result": netvuln_result,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -291,31 +350,73 @@ def dispatch_specialist_agents(state: OrchestratorState) -> dict:
 
 
 def ingest_network_agent_results(state: OrchestratorState) -> dict:
-    """Ingests whatever the teammate's Network Vulnerability Agent has
-    already submitted via `POST /assessments/{id}/external-findings` (stored
-    separately, see app.api.routes) — this node does NOT invoke his agent;
-    it only reads the state.get('external_network_findings_raw') payload
-    that was queued for this run (e.g. by a synthetic fixture during
-    development, or by his real submission once integrated)."""
+    """Pulls network-surface findings from two independent sources, neither
+    of which this node dispatches or scans with itself:
+
+    1. Whatever was POSTed to `/assessments/{id}/external-findings` and
+       queued for this run via `external_network_findings_raw` — the
+       contract for a separate, deeper Network Vulnerability Assessment
+       Agent, should one be built later (app.adapters.external_network_agent).
+    2. The Network Discovery Probe's own `leads()` feed, pulled fresh on
+       every run when `settings.probe_auto_ingest_leads` and
+       `settings.probe_api_url` are set (app.adapters.probe_leads) — the
+       real signal this application has today.
+
+    One source failing (e.g. Probe unreachable) does not discard the other;
+    the task is only `failed` if every configured/supplied source failed,
+    and `skipped` only if nothing was configured or supplied at all.
+    """
     assessment_id = state["assessment_id"]
     scope_id = state["scope_id"]
     graph = state.get("network_graph")
     raw_payload = state.get("external_network_findings_raw", [])
-
-    if not raw_payload:
-        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.SKIPPED, error="no external findings submitted for this run")
-        return {"network_agent_findings": []}
-
-    _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.RUNNING)
     known_asset_ids = {a.asset_id for a in graph.assets} if graph else None
-    try:
-        validated = validate_external_findings(assessment_id, scope_id, raw_payload, known_asset_ids=known_asset_ids)
-        findings = to_findings(validated)
-        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.COMPLETED)
-        return {"network_agent_findings": findings}
-    except Exception as exc:  # noqa: BLE001 - one bad submission must not abort the assessment
-        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.FAILED, error=str(exc))
-        return {"network_agent_findings": [], "errors": state.get("errors", []) + [f"ingest_network_agent_results: {exc}"]}
+
+    all_findings: list = []
+    all_evidence: list = []
+    source_errors: list[str] = []
+    any_source_attempted = False
+
+    if raw_payload:
+        any_source_attempted = True
+        try:
+            validated = validate_external_findings(assessment_id, scope_id, raw_payload, known_asset_ids=known_asset_ids)
+            all_findings.extend(to_findings(validated))
+        except Exception as exc:  # noqa: BLE001 - one bad submission must not abort the assessment
+            source_errors.append(f"external_findings_payload: {exc}")
+
+    if settings.probe_auto_ingest_leads and settings.probe_api_url:
+        any_source_attempted = True
+        try:
+            from probe.client import ProbeClient, ProbeError
+
+            leads = ProbeClient(base_url=settings.probe_api_url).leads()
+            lead_findings, lead_evidence = findings_from_probe_leads(leads, assessment_id=assessment_id)
+            all_findings.extend(lead_findings)
+            all_evidence.extend(lead_evidence)
+        except ImportError:
+            source_errors.append("probe_leads: 'probe' package not importable")
+        except ProbeError as exc:
+            source_errors.append(f"probe_leads: could not reach Probe at {settings.probe_api_url}: {exc}")
+
+    if not any_source_attempted:
+        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.SKIPPED,
+                    error="no external findings submitted and Probe lead auto-ingest is disabled/unconfigured")
+        return {"network_agent_findings": [], "network_agent_evidence": []}
+
+    if source_errors and not all_findings:
+        _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.FAILED, error="; ".join(source_errors))
+        return {
+            "network_agent_findings": [], "network_agent_evidence": [],
+            "errors": state.get("errors", []) + [f"ingest_network_agent_results: {e}" for e in source_errors],
+        }
+
+    _mark_task(assessment_id, AgentId.NETWORK_VULNERABILITY, TaskStatus.COMPLETED,
+                error="; ".join(source_errors) if source_errors else None)
+    return {
+        "network_agent_findings": all_findings, "network_agent_evidence": all_evidence,
+        "errors": state.get("errors", []) + [f"ingest_network_agent_results: {e}" for e in source_errors],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +438,13 @@ def aggregate_findings(state: OrchestratorState) -> dict:
         all_findings.extend(binary_result.findings)
         all_evidence.extend(binary_result.evidence)
 
+    netvuln_result = state.get("network_vulnerability_result")
+    if netvuln_result is not None:
+        all_findings.extend(netvuln_result.findings)
+        all_evidence.extend(netvuln_result.evidence)
+
     all_findings.extend(state.get("network_agent_findings", []))
+    all_evidence.extend(state.get("network_agent_evidence", []))
 
     with session_scope() as db:
         repository.store_findings(db, all_findings, all_evidence)
@@ -402,7 +509,7 @@ def build_attack_paths(state: OrchestratorState) -> dict:
 
 def map_ptes_phases(state: OrchestratorState) -> dict:
     tool_executions: list[dict] = []
-    for result in (state.get("web_agent_result"), state.get("binary_agent_result")):
+    for result in (state.get("web_agent_result"), state.get("binary_agent_result"), state.get("network_vulnerability_result")):
         if result is not None:
             tool_executions.extend(result.tool_executions)
 
@@ -431,25 +538,35 @@ def generate_report(state: OrchestratorState) -> dict:
 
 
 def complete_assessment(state: OrchestratorState) -> dict:
-    errors = state.get("errors", [])
-    web_result = state.get("web_agent_result")
-    binary_result = state.get("binary_agent_result")
+    """Determines the final AssessmentStatus from each specialist task's
+    actual recorded TaskStatus (persisted by `_mark_task` throughout this
+    run) — NOT from `OrchestratorState.errors`.
 
-    task_failures = [
-        r for r in (web_result, binary_result)
-        if r is not None and r.execution_status == TaskStatus.FAILED
-    ]
-
-    if task_failures and len(task_failures) == sum(1 for r in (web_result, binary_result) if r is not None):
-        final_status = AssessmentStatus.FAILED
-    elif task_failures or errors:
-        final_status = AssessmentStatus.PARTIALLY_COMPLETED
-    else:
-        final_status = AssessmentStatus.COMPLETED
+    `errors` previously drove this decision directly, which was a bug: that
+    list also accumulates benign diagnostic notes (e.g. validate_scope's
+    "a permission is enabled but there's nothing in the graph to use it
+    on") that are not failures. A run where every attempted task actually
+    completed, but validate_scope merely noted a configuration mismatch,
+    was incorrectly reported as `partially_completed`. SKIPPED tasks
+    (not authorised, or nothing to do) don't count as failures either —
+    only COMPLETED vs FAILED among tasks that were actually attempted.
+    """
+    assessment_id = state["assessment_id"]
 
     with session_scope() as db:
-        repository.update_assessment_status(db, state["assessment_id"], final_status, completed_at=_now())
-        repository.log_event(db, state["assessment_id"], AgentId.ORCHESTRATOR.value,
+        tasks = repository.list_agent_tasks(db, assessment_id)
+        attempted = [t for t in tasks if t.status in (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)]
+        failed = [t for t in attempted if t.status == TaskStatus.FAILED.value]
+
+        if attempted and len(failed) == len(attempted):
+            final_status = AssessmentStatus.FAILED
+        elif failed:
+            final_status = AssessmentStatus.PARTIALLY_COMPLETED
+        else:
+            final_status = AssessmentStatus.COMPLETED
+
+        repository.update_assessment_status(db, assessment_id, final_status, completed_at=_now())
+        repository.log_event(db, assessment_id, AgentId.ORCHESTRATOR.value,
                               f"assessment complete: status={final_status.value}")
 
     return {"assessment_status": final_status.value}

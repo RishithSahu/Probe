@@ -41,10 +41,38 @@ router = APIRouter()
 
 
 def _run_orchestrator_background(initial_state: OrchestratorState) -> None:
+    """BUG FIX: this used to only log an uncaught exception from
+    `run_assessment` and return. Every individual orchestrator node already
+    catches its own tool/validation errors and reports them through state,
+    but an exception escaping the graph itself (e.g. a bug in a node, a DB
+    outage mid-run) left the assessment's DB row exactly where
+    `validate_assessment` had set it — `running` — forever. Nothing ever
+    moved it to `failed`, so `GET /assessments/{id}` kept reporting "running"
+    indefinitely with no indication anything had gone wrong: actively
+    misleading for an "autonomous" system nobody may be watching the logs
+    of. Now explicitly marks the assessment `failed` with the error logged
+    against it, so the API surface reflects reality even in this case."""
+    assessment_id = initial_state.get("assessment_id")
     try:
         run_assessment(initial_state)
-    except Exception:  # noqa: BLE001 - background task; must not crash the worker
-        logger.exception("orchestrator run failed for assessment %s", initial_state.get("assessment_id"))
+    except Exception as exc:  # noqa: BLE001 - background task; must not crash the worker
+        logger.exception("orchestrator run failed for assessment %s", assessment_id)
+        if assessment_id:
+            try:
+                from datetime import datetime, timezone
+
+                from app.database.session import session_scope
+
+                with session_scope() as db:
+                    repository.update_assessment_status(
+                        db, assessment_id, AssessmentStatus.FAILED, completed_at=datetime.now(timezone.utc),
+                    )
+                    repository.log_event(
+                        db, assessment_id, "orchestrator",
+                        f"orchestrator run crashed: {type(exc).__name__}: {exc}", level="error",
+                    )
+            except Exception:  # noqa: BLE001 - best-effort status update; the crash itself is already logged
+                logger.exception("additionally failed to mark assessment %s as failed in the database", assessment_id)
 
 
 @router.post("/assessments", response_model=CreateAssessmentResponse, status_code=201)

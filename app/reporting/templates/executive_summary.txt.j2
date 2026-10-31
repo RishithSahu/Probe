@@ -1,4 +1,7 @@
-This report presents the results of an authorised security assessment (assessment ID {{ assessment_id }}, scope {{ scope_id }}) conducted against {{ asset_count }} network asset(s){% if binary_count %} and {{ binary_count }} supplied binary file(s){% endif %}.
+{% if fixture_tools_used %}*** DATA INTEGRITY WARNING ***
+This report contains SYNTHETIC/FIXTURE findings, not exclusively real scan results. The following tool(s) were unavailable during this run and their output was substituted with documented placeholder data for continuity: {{ fixture_tools_used | join(', ') }}. Findings attributable to these tools must NOT be treated as real assessment results. See "data_integrity" in the JSON report and each finding's evidence/tool_executions for which tool produced it. Re-run this assessment with the real tool(s) installed and reachable before relying on this report.
+
+{% endif %}This report presents the results of an authorised security assessment (assessment ID {{ assessment_id }}, scope {{ scope_id }}) conducted against {{ asset_count }} network asset(s){% if binary_count %} and {{ binary_count }} supplied binary file(s){% endif %}.
 
 The assessment combined network-service findings from the Network Vulnerability Assessment Agent with web-application findings from the Web Security Assessment Agent and static binary findings from the Binary Analysis Agent, coordinated by a LangGraph-based Orchestrator. {{ confirmed_count }} finding(s) were confirmed and {{ suspected_count }} remain suspected pending further verification{% if rejected_count %}; {{ rejected_count }} were reviewed and rejected as false positives{% endif %}.
 

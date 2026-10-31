@@ -1,46 +1,69 @@
 # Network Graph Integration Contract
 
-Status: **provisional**. The network probe is being developed independently by
-a teammate and has not yet been pushed to this repository. This document
-defines the interface our application depends on, so his implementation and
-ours can be built in parallel and integrated without either side waiting on
-the other.
+Status: **integrated**. The Network Discovery Probe (`probe/`) is now part of
+this repository, and `app/adapters/network_graph_adapter.py` consumes its
+real API per [`docs/CONTRACT.md`](CONTRACT.md) (the probe-side contract —
+read that first; this document covers only the app-side adapter mechanics).
+The provisional static-file contract described below still exists and is
+still used — for offline development, synthetic fixtures, tests, and an
+exported snapshot of a live inventory — but it is no longer the primary
+path.
 
 ## Why this exists
 
 `app/adapters/network_graph_adapter.py` is the *only* place in this codebase
-allowed to know about the network probe's output format. Nothing downstream
-(Scope Guard, Web Agent, Orchestrator, Attack Path analysis, reporting) talks
-to the raw graph — everything consumes `app.core.schemas.NetworkGraph`, the
-normalised internal representation. That boundary means:
+allowed to know about Probe's output shape. Nothing downstream (Scope Guard,
+Web/Binary Agents, Orchestrator, attack-path correlation, reporting) talks to
+raw Probe JSON — everything consumes `app.core.schemas.NetworkGraph`, the
+normalised internal representation, regardless of which source produced it.
 
-- When the real probe is pushed, only the adapter's parsing logic needs to
-  change (or, if his export already matches the provisional shape below,
-  nothing needs to change at all).
-- Until then, development and tests proceed against synthetic fixtures in
-  `tests/fixtures/network_graphs/` that conform to the same provisional shape.
+## Two sources, one normalised shape
 
-## How to swap in the real probe once it is pushed
+| Source | Class | Normaliser | When used |
+|---|---|---|---|
+| Live Probe API | `ProbeAPISource` | `normalise_probe_graph` | Default — `app/orchestrator/nodes.py::load_network_graph` falls back to this whenever an assessment doesn't supply a static file path and `APE_PROBE_API_URL` is set. |
+| Static JSON file | `JSONFileNetworkGraphSource` | `normalise` | When the request supplies `network_graph_path`; also what `tests/fixtures/network_graphs/sample_graph.json` and the synthetic demo use. |
 
-1. Inspect what his code actually produces: a JSON file export, a database
-   table, or a live API/module call.
-2. If it's a JSON export: compare its shape against
-   `tests/fixtures/network_graphs/sample_graph.json`. If the field names
-   differ, extend `_coerce_wire_record` in `network_graph_adapter.py` — it is
-   written as a tolerant, defensive parser specifically so differing key names
-   (`host_id` vs `asset_id`, `services` vs `ports`, etc.) can be mapped in one
-   place.
-3. If it's a live call (function import or HTTP API) instead of a file: add a
-   new `NetworkGraphSource` implementation (see the `JSONFileNetworkGraphSource`
-   class for the pattern) that fetches the raw graph, then feed it through the
-   same `_coerce_wire_record` / `normalise()` pipeline. Nothing else in the
-   adapter, and nothing outside it, needs to change.
-4. Update `assessment.network_graph_ref` handling in
-   `app/orchestrator/nodes.py::load_network_graph` only if the *location*
-   mechanism changes (e.g. from "path on disk" to "assessment_id to query his
-   API with"). The normalisation step itself is unaffected.
+`ProbeAPISource` talks to `probe.client.ProbeClient` (stdlib-only — no
+scapy, no admin rights needed by the orchestrator process) and pulls
+`GET /api/hosts` + `GET /api/segments`, exactly as documented in
+[`docs/CONTRACT.md`](CONTRACT.md) §2. `normalise_probe_graph` maps Probe's
+real field names (verified against `probe/store.py`, not just the contract
+prose — e.g. Probe's own `held`/`verdict`/`open_ports` fields, not a
+provisional guess) onto `NetworkGraph`:
 
-## Provisional wire format (used by fixtures today)
+- `asset_id` = the host's `ip` (Probe's own identity for a host).
+- `held` and `verdict` are carried through onto `NetworkGraphAssetRecord` —
+  see "Held-segment safety" below.
+- Each `open_ports` entry becomes a `NetworkGraphServiceRecord`, including
+  `product`/`banner` when Probe captured them.
+- Edges are derived **only** from a segment's explicit `via` pivot field — a
+  real, Probe-observed relationship, never invented from address proximity
+  or co-location. A Probe deployment that never populates `via` simply
+  yields fewer edges; that is honest, not a bug.
+
+Probe's `leads()` feed (hidden hosts, banner-flagged apps, anomalies) is
+translated separately, by `app/adapters/probe_leads.py`, into network-surface
+`Finding`s — see that module's docstring for why these stay `suspected`
+rather than `confirmed`.
+
+## Held-segment safety
+
+A segment Probe has not yet had approved by the network owner (`python -m
+probe approve <cidr>`) is "held", and any host inside it carries
+`held: true`. This is enforced as a **hard rule**, not something an
+`AssessmentPolicy` permission can relax:
+
+- `extract_http_services()` excludes held assets unconditionally — a held
+  host's HTTP service is never offered to the Web Agent.
+- `ScopeGuard.check_asset_in_scope()` refuses a held asset even if an
+  operator explicitly lists its `asset_id` in `approved_asset_ids` — that is
+  treated as a mistake to refuse, not an override to honour.
+- When `approved_asset_ids` is left empty (the common case), the Scope
+  Guard's default scope is every known asset **except** held ones — see
+  `non_held_asset_ids()`.
+
+## Provisional static-file format (still used for fixtures/tests)
 
 ```json
 {
@@ -50,7 +73,7 @@ normalised internal representation. That boundary means:
   "hosts": [
     {
       "asset_id": "HOST-001",
-      "ip": "192.168.60.10",
+      "ip": "10.20.30.10",
       "hostname": "web01.lab.local",
       "asset_type": "host",
       "services": [
@@ -70,7 +93,7 @@ normalised internal representation. That boundary means:
 }
 ```
 
-Tolerated synonyms (handled defensively, not assumed to be the final format):
+Tolerated synonyms (handled defensively):
 
 | Canonical field      | Accepted synonyms                          |
 |-----------------------|---------------------------------------------|
@@ -84,27 +107,17 @@ Tolerated synonyms (handled defensively, not assumed to be the final format):
 Any record missing a required identifier (`asset_id`/synonym) is rejected
 with `GraphValidationError` rather than silently dropped or invented — a
 partial/corrupt graph must fail loudly, not produce a quietly-incomplete
-assessment.
+assessment. This same rule applies to the Probe-sourced path: a malformed
+response raises `GraphValidationError` rather than producing a partial
+inventory.
 
-## What the adapter guarantees downstream
+## What the adapter guarantees downstream, regardless of source
 
-- Original `asset_id` / `service_id` values from the source graph are
-  preserved verbatim — never regenerated — so the teammate's Network
-  Vulnerability Agent's findings (which reference those same IDs) line up
-  with ours without a translation table.
+- Original asset identity (Probe's `ip`, or a file's `asset_id`) is
+  preserved verbatim — never regenerated — so findings that reference an
+  asset line up with the inventory without a translation table.
 - No new hosts, services, or edges are invented. The adapter normalises
-  shape, it does not enrich content.
-- No network discovery is performed by this adapter or by anything that
+  shape; it does not enrich content.
+- No network discovery is performed by this adapter, or by anything that
   consumes its output — it is a pure, read-only transform of an
-  already-completed graph.
-
-## Open questions for integration (ask the teammate)
-
-- Exact export mechanism: file path convention, or an API endpoint we should
-  poll/call?
-- Are `service_id`s globally unique already, or only unique per-host (in
-  which case the adapter namespaces them as `{asset_id}:{service_id}` — see
-  `normalise()`)?
-- Does his graph ever represent services without a resolved `service_name`
-  (e.g. raw port-only results), and if so should those be treated as
-  non-HTTP by default (current adapter behaviour: yes)?
+  already-completed (or live-queried) inventory.

@@ -28,6 +28,7 @@ _ACTIVITY_PHASE_MAP: dict[tuple[str, str], PtesPhase] = {
     ("zap_passive", "scan"): PtesPhase.VULNERABILITY_ANALYSIS,
     ("ghidra", "static_analysis"): PtesPhase.VULNERABILITY_ANALYSIS,
     ("network_vulnerability_agent", "service_assessment"): PtesPhase.VULNERABILITY_ANALYSIS,
+    ("network_vulnerability_detective", "service_check"): PtesPhase.VULNERABILITY_ANALYSIS,
     ("zap_active", "scan"): PtesPhase.EXPLOITATION,
     ("zap", "active_scan"): PtesPhase.EXPLOITATION,
 }

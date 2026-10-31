@@ -1,0 +1,11 @@
+# Additional dependencies to actually RUN `python -m probe` (the scanning
+# process itself) — install alongside requirements.txt on that machine:
+#   pip install -r requirements.txt -r requirements-probe.txt
+# Not needed by the orchestrator/web-agent/binary-agent containers: they
+# only ever import probe.client.ProbeClient, which is stdlib-only.
+#
+# scapy additionally needs Npcap (Windows, https://npcap.com) or libpcap
+# (Linux: `apt install libpcap-dev`; macOS: ships with the OS) for raw
+# packet capture — scapy itself installs fine via pip without it, but
+# Probe's actual scanning will fail at runtime until it's present.
+scapy>=2.5

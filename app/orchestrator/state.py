@@ -42,7 +42,14 @@ class OrchestratorState(TypedDict, total=False):
     # --- Agent outputs -----------------------------------------------------
     web_agent_result: AgentResult | None
     binary_agent_result: AgentResult | None
+    # This app's own Network Vulnerability Detective (app/agents/network_vulnerability/)
+    # — safe, read-only protocol probes against already-discovered services.
+    # Kept separate from network_agent_findings/evidence below (which cover
+    # the EXTERNAL-agent contract + Probe's own leads) so each source's
+    # provenance/tool_executions stay distinguishable in the report.
+    network_vulnerability_result: AgentResult | None
     network_agent_findings: list[Finding]
+    network_agent_evidence: list[Evidence]
 
     # --- Aggregation / post-processing --------------------------------------
     all_findings: list[Finding]

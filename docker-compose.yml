@@ -1,11 +1,15 @@
-version: "3.9"
-
 # No database service: the orchestrator defaults to a SQLite file under the
 # bind-mounted evidence/ directory (persists across `docker compose down`/
 # `up`, visible on the host at ./evidence/ape.db). To use PostgreSQL instead,
 # add a `postgres` service back and set APE_DATABASE_URL accordingly on the
 # orchestrator service below — no code change needed (app/database/session.py
 # builds its engine generically from that URL).
+#
+# Also no `probe` service: the Network Discovery Probe (probe/) needs
+# raw-socket/admin access and normally runs directly on a host, not in a
+# container — run `python -m probe` separately and point the orchestrator
+# at it with APE_PROBE_API_URL (see below and README.md's "Network
+# Discovery Probe integration").
 
 services:
   zap:
@@ -73,6 +77,10 @@ services:
       APE_NETWORK_GRAPH_DIR: /data/inputs/network_graphs
       APE_BINARIES_DIR: /data/inputs/binaries
       APE_REPORTS_DIR: /data/evidence/reports
+      # Docker Desktop (Windows/Mac) resolves this to the host; on Linux use
+      # the host's bridge/LAN IP instead. Leave unset (or blank) to disable
+      # the live Probe integration and require network_graph_path per request.
+      APE_PROBE_API_URL: http://host.docker.internal:8080
       # Uncomment to dispatch to the standalone agent services instead of
       # running their code in-process:
       # APE_WEB_AGENT_SERVICE_URL: http://web-agent:8001
@@ -83,6 +91,11 @@ services:
       - ./evidence:/data/evidence
     ports:
       - "8000:8000"
+    extra_hosts:
+      # host.docker.internal resolves out of the box on Docker Desktop
+      # (Windows/Mac); this makes it also resolve on Linux (Docker Engine
+      # 20.10+), so APE_PROBE_API_URL above works unmodified everywhere.
+      - "host.docker.internal:host-gateway"
     depends_on:
       zap:
         condition: service_started

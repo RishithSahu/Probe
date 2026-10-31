@@ -70,12 +70,34 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         findings_by_surface.setdefault(f.surface.value, []).append(_finding_dict(f))
 
     incomplete_tasks = []
-    for result_key, label in (("web_agent_result", "Web Security Agent"), ("binary_agent_result", "Binary Analysis Agent")):
+    for result_key, label in (
+        ("web_agent_result", "Web Security Agent"),
+        ("binary_agent_result", "Binary Analysis Agent"),
+        ("network_vulnerability_result", "Network Vulnerability Detective"),
+    ):
         result = state.get(result_key)
         if result is not None and result.errors:
             incomplete_tasks.append(f"{label}: {'; '.join(result.errors)}")
     if not state.get("network_agent_findings"):
-        incomplete_tasks.append("Network Vulnerability Agent: no results ingested for this run")
+        incomplete_tasks.append("External Network Vulnerability Agent: no results ingested for this run")
+
+    # FIX (fundamental report-integrity gap): when a real tool (Katana, ZAP,
+    # Ghidra) is unavailable, its agent silently substitutes documented
+    # synthetic fixture data (see each agent's `_synthetic_*` fallback) so
+    # development/demos keep working. That substitution was previously
+    # invisible in the final report — a reader had no way to tell a
+    # fixture-generated finding from a real one. Every tool_executions entry
+    # already carries `used_fixture`; this surfaces it as an explicit,
+    # unmissable report section instead of silently losing that signal.
+    fixture_tools_used: set[str] = set()
+    for result_key in ("web_agent_result", "binary_agent_result", "network_vulnerability_result"):
+        result = state.get(result_key)
+        if result is None:
+            continue
+        for te in result.tool_executions:
+            if te.get("used_fixture"):
+                fixture_tools_used.add(te.get("tool", "unknown"))
+    fixture_tools_used = sorted(fixture_tools_used)
 
     policy = state.get("policy")
     policy_dict = policy.model_dump(mode="json") if policy else {}
@@ -90,6 +112,7 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         rejected_count=findings_by_status.get("rejected", 0),
         severity_counts={s: findings_by_severity.get(s, 0) for s in _SEVERITY_ORDER if findings_by_severity.get(s, 0)},
         incomplete_tasks=incomplete_tasks,
+        fixture_tools_used=fixture_tools_used,
     )
     methodology = _jinja_env.get_template("methodology.txt.j2").render(
         crawling_enabled=policy_dict.get("allow_web_crawling", False),
@@ -116,6 +139,14 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         "attack_paths": attack_path_edges,
         "ptes_mapping": ptes_summary,
         "incomplete_tasks_and_limitations": incomplete_tasks,
+        # See the fixture_tools_used comment above `exec_summary` — this is
+        # the authoritative, machine-readable form of that warning. A
+        # non-empty list means at least one tool's findings in this report
+        # are synthetic fixture data, not real scan results.
+        "data_integrity": {
+            "fixture_tools_used": fixture_tools_used,
+            "contains_synthetic_data": bool(fixture_tools_used),
+        },
     }
 
 
@@ -141,6 +172,20 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
     story.append(Paragraph(f"Assessment {report_data['assessment_id']} &middot; Scope {report_data['scope_id']}", styles["Normal"]))
     story.append(Paragraph(f"Generated {report_data['generated_at']}", styles["Normal"]))
     story.append(Spacer(1, 0.5 * cm))
+
+    fixture_tools = report_data.get("data_integrity", {}).get("fixture_tools_used", [])
+    if fixture_tools:
+        warning_style = ParagraphStyle(
+            "data_integrity_warning", parent=styles["Normal"], textColor=colors.white,
+            backColor=colors.HexColor("#b91c1c"), borderPadding=8, leading=14,
+        )
+        story.append(Paragraph(
+            f"<b>DATA INTEGRITY WARNING</b> &mdash; this report contains SYNTHETIC/FIXTURE data from: "
+            f"<b>{', '.join(fixture_tools)}</b>. These tool(s) were unavailable during this run; their "
+            "findings are documented placeholders, not real scan results, and must not be acted on as such.",
+            warning_style,
+        ))
+        story.append(Spacer(1, 0.5 * cm))
 
     story.append(Paragraph("Executive Summary", styles["Heading1"]))
     for para in report_data["executive_summary"].split("\n\n"):

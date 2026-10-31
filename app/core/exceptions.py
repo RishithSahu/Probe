@@ -18,6 +18,16 @@ class ScopeViolationError(AppError):
     that takes down the rest of the assessment."""
 
 
+class DryRunSkipped(ScopeViolationError):
+    """Raised by the Scope Guard instead of actually permitting a tool call
+    when `AssessmentPolicy.dry_run` is set — the operation would have been
+    authorised (recorded `allowed=True` in the audit log), but is not
+    executed. Deliberately a `ScopeViolationError` subclass so every
+    existing `except ScopeViolationError` call site already stops execution
+    correctly without needing to know about dry-run specifically; callers
+    that do want to tell the two apart can `except DryRunSkipped` first."""
+
+
 class GraphValidationError(AppError):
     """Raised by the Network Graph Adapter when the supplied graph is malformed,
     missing required fields, or otherwise cannot be safely normalised."""

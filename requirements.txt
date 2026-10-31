@@ -23,13 +23,14 @@ networkx==3.3
 Jinja2==3.1.3
 reportlab==5.1.0
 
-# Network Discovery Probe (teammate's component, probe/) — only needed to
-# RUN `python -m probe` (the actual scanning process). The orchestrator only
-# imports probe.client.ProbeClient, which is stdlib-only (json/time/urllib)
-# and does NOT require scapy — see app/adapters/network_graph_adapter.py.
-# Install this on the machine that actually runs the probe, with Npcap
-# (Windows) or libpcap (Linux/macOS) present.
-scapy>=2.5
+# Network Discovery Probe (teammate's component, probe/): NOT listed here on
+# purpose. `app.adapters.network_graph_adapter.ProbeAPISource` only imports
+# probe.client.ProbeClient, which is stdlib-only (json/time/urllib) and needs
+# none of Probe's own dependencies — all three app containers (orchestrator,
+# web-agent, binary-agent) stay lean. To actually RUN `python -m probe` (the
+# scanning process itself), additionally install requirements-probe.txt on
+# that machine, with Npcap (Windows) or libpcap (Linux/macOS) present:
+#   pip install -r requirements.txt -r requirements-probe.txt
 
 # Testing / quality (dev only — also installed in the orchestrator image so
 # `pytest`/`ruff` can be run inside the container if preferred over host)

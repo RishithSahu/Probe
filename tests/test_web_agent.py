@@ -1,4 +1,4 @@
-from pathlib import Path
+import pytest
 
 from app.agents.web_security.agent import WebTarget, run_web_security_agent
 from app.agents.web_security.crawler import crawl
@@ -7,7 +7,6 @@ from app.agents.web_security.zap_integration import run_passive_scan
 from app.core.exceptions import ScopeViolationError
 from app.core.schemas import AssessmentPolicy, TaskStatus
 from app.core.scope_guard import ScopeGuard
-import pytest
 
 
 def _guard(base_url: str, **policy_kwargs) -> ScopeGuard:
@@ -16,6 +15,7 @@ def _guard(base_url: str, **policy_kwargs) -> ScopeGuard:
         allow_web_crawling=True,
         approved_web_origins=[base_url],
         approved_asset_ids=["HOST-001"],
+        dry_run=False,  # these tests exercise real (or fixture-backed) execution
         **policy_kwargs,
     )
     return ScopeGuard(policy)

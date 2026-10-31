@@ -49,7 +49,7 @@ def test_static_analysis_detects_fixture_weaknesses(tmp_path):
 
 
 def test_full_binary_agent_run_produces_findings(tmp_path):
-    policy = AssessmentPolicy(allow_binary_analysis=True)
+    policy = AssessmentPolicy(allow_binary_analysis=True, dry_run=False)
     guard = ScopeGuard(policy)
     result = run_binary_analysis_agent(
         [("BINARY-001", FIXTURES / "minimal_elf64.bin")],
