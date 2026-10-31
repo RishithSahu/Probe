@@ -73,7 +73,7 @@ def check(policy_path: Path, *, expected=None) -> tuple[bool, str]:
         script = Path(__file__).resolve().parent.parent / 'enforce' / 'windows-program-scope.ps1'
         run = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(script),
                               '-PolicyFile', str(Path(policy_path).resolve())], capture_output=True, text=True,
-                             timeout=12, creationflags=subprocess.CREATE_NO_WINDOW)
+                             timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
         if run.returncode:
             return False, (run.stderr or run.stdout).strip()[:600]
         validate_readback(policy, json.loads(run.stdout))

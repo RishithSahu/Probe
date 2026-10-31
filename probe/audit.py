@@ -206,6 +206,28 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s")
     sniffer = threading.Thread(target=sniff_loop, daemon=True)
     sniffer.start()
+
+    # egress.check() shells out to PowerShell with its own 12s timeout; it used to run inline in this
+    # loop, which also promises the engine a heartbeat every 0.5s (Attestation.check()'s STALE_AFTER is
+    # only 3.0s). Under the CPU load of the engine's own concurrent nmap -sU/-O during fingerprinting, that
+    # subprocess call genuinely ran past 12s often enough to raise TimeoutExpired -- which this loop then
+    # treated as "scope enforcement cannot be verified" and killed the whole engine process over, even
+    # though nothing was ever actually out of scope. Running it in its own thread, on its own slower cadence,
+    # keeps the heartbeat write on schedule regardless of how long one egress read-back takes; a genuine
+    # egress failure (not just a slow one) still calls violation() exactly as before, from this thread.
+    egress_state = {"ok": True, "why": ""}
+
+    def egress_loop() -> None:
+        while not stop_flag["stop"]:
+            ok, why = egress.check(Path(a.egress_policy), expected=policy)
+            egress_state["ok"], egress_state["why"] = ok, why
+            if not ok:
+                violation("<helper-egress>", "independent scope enforcement cannot be verified: " + why)
+                return
+            time.sleep(1.0)
+
+    threading.Thread(target=egress_loop, daemon=True).start()
+
     n = 0
     try:
         while True:
@@ -216,15 +238,13 @@ def main(argv=None) -> int:
                 ok, why = territory.check()
                 if not ok:
                     violation("<territory>", f"scanner left the permitted network: {why}")
-            ok, why = egress.check(Path(a.egress_policy), expected=policy)
-            if not ok:
-                violation("<helper-egress>", "independent scope enforcement cannot be verified: " + why)
             if capture["error"] or not sniffer.is_alive():
                 violation("<capture>", "independent capture failed: " + str(capture["error"]))
             try:                                      # a hiccup writing the heartbeat must never kill the auditor
                 (state / HEARTBEATS[n % 2]).write_text(json.dumps({"t": time.time(), **counters,
                     "scope_digest": digest, "run_id": a.run_id, "auditor_pid": os.getpid(),
-                    "capture_ready": capture["ready"] and sniffer.is_alive(), "helper_egress_verified": ok}), encoding="utf-8")
+                    "capture_ready": capture["ready"] and sniffer.is_alive(),
+                    "helper_egress_verified": egress_state["ok"]}), encoding="utf-8")
             except OSError as exc:
                 logging.warning("heartbeat write failed (will retry): %s", exc)
             n += 1

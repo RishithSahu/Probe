@@ -581,3 +581,80 @@ the authorised `NetworkGraph`.
     persistent `PATH`, but a shell/session already running when that
     change was made won't see it until restarted — explicit setup, like
     `APE_GHIDRA_INSTALL_DIR`, not something the code can detect for you.
+
+- **Entry 9** — Pulled the teammate's new autonomous-loop commit
+  (`cc19ca6`, "Add orchestrator-controlled autonomous assessment loop with
+  evidence-driven scheduler": `app/orchestrator/__main__.py`,
+  `autonomous_loop.py`, `scheduler.py` — a one-command, resumable
+  `python -m app.orchestrator run --assessment-id ID --scope CIDR
+  --max-minutes N` that starts Probe itself, reads back its real
+  discovery, then iterates candidate-scoring → agent dispatch →
+  verification). Clean fast-forward; the only friction was the same
+  gitignored stale `evidence/ape.db` issue as Entry 7 (the new
+  `parent_task_id` column from the teammate's migration didn't exist in
+  the stale local file) — deleted it, 460 passed/4 skipped.
+
+  Then actually ran that new command against the real lab scope end to
+  end, which surfaced two further real bugs, neither in anything added
+  this entry — both were already-present gaps the new CLI finally
+  exercised for the first time:
+
+  1. **The orchestrator's own Probe-launch command disabled the thing it
+     was about to poll.** `_start_probe_and_discover` passed `--no-ui` to
+     `python -m probe run`, intending "headless." But Probe's own
+     `cli.py` (`if not args.no_ui: ... uvicorn.Server(cfg).run()`) only
+     starts its HTTP API at all when `--no-ui` is *absent* — the flag
+     disables the API, not just the browser-facing web view. So Probe's
+     own scan ran to completion correctly underneath it (confirmed: its
+     own phase-by-phase log ran all the way to `enrich`), but
+     `ProbeClient.status()` had nothing to poll and the orchestrator
+     always hit its 180s timeout, regardless of admin rights — this is
+     what the user saw and correctly identified as "it's not working even
+     though I ran it as administrator." Fixed by removing `--no-ui` from
+     the command `__main__.py` builds.
+  2. **A real, reproduced auditor false-positive kill**, independently
+     matching the *mechanism* already described (but, per that entry's
+     own text, never fixed) in Entry 4 — reproduced live, not inferred:
+     after fix #1 let the orchestrator actually reach the `fingerprint`
+     phase, the whole Probe process died with
+     `CRITICAL probe.killswitch: KILL SWITCH: ... auditor heartbeat
+     stale`. Root-caused in `probe/audit.py`: the auditor's main loop
+     both promises the engine a heartbeat every 0.5s (`Attestation`'s
+     `STALE_AFTER` is only 3.0s) *and* calls `egress.check()` inline —
+     a PowerShell subprocess shell-out with its own hard 12s timeout.
+     Under the CPU load of the engine's own concurrent `nmap -sU`/`-O`
+     during fingerprinting, that subprocess call ran long enough to raise
+     `TimeoutExpired`; `egress.check()` turned that into
+     `(False, "...")`, and the auditor's fail-closed design (correctly,
+     by its own logic, just acting on a false premise) treated an
+     unverifiable check as a scope violation and `SIGTERM`'d the whole
+     engine — a false-positive safety trip, not an actual out-of-scope
+     probe. Fixed by moving `egress.check()` into its own thread on a
+     1s cadence, decoupled from the 0.5s heartbeat-write loop, so a slow
+     read-back no longer blocks the heartbeat the engine depends on; a
+     genuine egress failure (not just a slow one) still calls
+     `violation()` exactly as before. Also widened the PowerShell
+     subprocess timeout itself (12s → 20s) as extra margin. Full suite
+     re-run after both changes: 460 passed/4 skipped (no existing test
+     exercises `audit.py` directly — it only runs live, under real
+     privileges). Live re-verification against the real lab scope
+     reached the `fingerprint` phase cleanly (no kill-switch trip) before
+     the lab network itself went down mid-session, which stopped further
+     live verification for the time being; the fix itself is unchanged by
+     that and stands on the code-level diagnosis above.
+
+  **Also closed the one gap Entry 8 flagged as not done**: ZAP's
+  passive/active scan previously only ever opened `target.url` — a page
+  Katana discovered (reachable only via a link, never the site root) was
+  invisible to ZAP's own header/cookie/active-rule checks even after
+  Entry 8 made Katana's own discoveries become `Finding`s. Changed
+  `web_security/agent.py`'s Stage C to run ZAP against the root URL plus
+  up to 10 additional, deduplicated endpoints Katana discovered (each
+  still goes through the normal per-URL Scope Guard check inside
+  `run_passive_scan`/`run_active_scan_if_authorised` — this does not
+  widen what ZAP is allowed to touch, only how many already-in-scope
+  URLs get the same checks the root URL always got). Added
+  `test_zap_scans_discovered_endpoints_not_just_the_root_url` (regression
+  test, uses the fixture crawl so it runs without a real `katana` binary
+  in CI) proving ZAP now scans more than one target per run. Full suite:
+  **461 passed, 4 skipped**.

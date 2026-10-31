@@ -85,6 +85,27 @@ def test_full_web_agent_run_produces_findings(tmp_path, synthetic_web_server):
     assert len(result.discovered_endpoints) > 0
 
 
+def test_zap_scans_discovered_endpoints_not_just_the_root_url(tmp_path, synthetic_web_server):
+    # Regression test for the documented gap: ZAP used to only ever see target.url, so a page Katana
+    # discovered (e.g. one reachable only via a link, never the site root) was invisible to ZAP's own
+    # checks. Crawling here uses the fixture (no real katana binary in CI), which is enough to prove the
+    # web agent now fans a ZAP scan out across what the crawler found, not just the seed URL.
+    guard = _guard(synthetic_web_server)
+    policy = AssessmentPolicy(
+        allow_passive_web_analysis=True,
+        allow_web_crawling=True,
+        approved_web_origins=[synthetic_web_server],
+        approved_asset_ids=["HOST-001"],
+    )
+    targets = [WebTarget(asset_id="HOST-001", url=synthetic_web_server + "/")]
+    result = run_web_security_agent(
+        targets, assessment_id="ASSESSMENT-001", scope_guard=guard, policy=policy, output_dir=tmp_path,
+    )
+    zap_passive_targets = {te["target"] for te in result.tool_executions if te.get("tool") == "zap_passive"}
+    assert len(zap_passive_targets) > 1, "ZAP should scan discovered endpoints in addition to the root URL"
+    assert synthetic_web_server + "/" in zap_passive_targets
+
+
 def test_web_agent_active_scan_skipped_when_not_authorised(tmp_path, synthetic_web_server):
     guard = _guard(synthetic_web_server)
     policy = AssessmentPolicy(

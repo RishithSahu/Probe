@@ -275,8 +275,10 @@ analysis already fed `static_analysis.py`. Two more real bugs (an
 over-broad `-disable-redirects` flag capping every real crawl at one page,
 and a crawl timeout shorter than a real crawl actually takes) were found
 and fixed alongside the parser bug — see Entry 8 for the full detail on
-each. ZAP still only scans the root URL, not Katana's discovered endpoints
-— a known, stated remaining gap, not yet closed.
+each. **Closed in Entry 9**: ZAP's Stage C now also scans up to 10
+deduplicated endpoints Katana discovered, not just the root URL — see
+`docs/PROGRESS.md` Entry 9 and
+`test_zap_scans_discovered_endpoints_not_just_the_root_url`.
 
 ## 10. Known gaps (not covered by this pass)
 

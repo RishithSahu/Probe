@@ -36,6 +36,11 @@ from app.core.scope_guard import ScopeGuard
 
 logger = logging.getLogger("ape.web_agent")
 
+# A cap, not a policy knob: bounds how many of Katana's discovered endpoints additionally get a ZAP
+# passive/active scan (beyond the root URL, which is always scanned), so a large crawl can't turn into an
+# unbounded number of ZAP scans per target.
+_MAX_ZAP_ENDPOINT_TARGETS = 10
+
 
 class WebTarget:
     """One graph-listed web service to assess, as handed to this agent by the
@@ -105,32 +110,48 @@ def assess_target(
         except (ScopeViolationError, ToolExecutionError) as exc:
             errors.append(f"crawl({target.url}): {exc}")
 
-    # Stage C: ZAP passive (+ active if authorised)
-    try:
-        passive = run_passive_scan(target.url, asset_id=target.asset_id, scope_guard=scope_guard)
-        tool_executions.append({"tool": "zap_passive", "target": target.url, "used_fixture": passive.used_fixture})
-        if passive.error:
-            errors.append(f"zap_passive({target.url}): {passive.error}")
-        zap_findings, zap_evidence = findings_from_zap_alerts(passive.alerts, assessment_id=assessment_id, asset_id=target.asset_id)
-        findings.extend(zap_findings)
-        evidence.extend(zap_evidence)
-    except (ScopeViolationError, ToolExecutionError) as exc:
-        errors.append(f"zap_passive({target.url}): {exc}")
+    # Stage C: ZAP passive (+ active if authorised) -- against the root URL AND every endpoint Katana
+    # discovered. Previously ZAP only ever saw target.url: a page Katana crawled to (e.g. an admin panel or
+    # a parametrised endpoint reachable only via a link, never the site root) was fully invisible to ZAP's
+    # own header/cookie/active-rule checks, even though Katana had already proven it exists and is in scope.
+    # Each endpoint still goes through its own scope_guard check inside run_passive_scan/
+    # run_active_scan_if_authorised -- this loop does not widen what ZAP is allowed to touch, only how many
+    # of the already-in-scope, already-discovered URLs get the same checks the root URL always got.
+    zap_targets = [target.url]
+    seen_zap_targets = {target.url}
+    for ep_url in endpoints:
+        base = ep_url.split("?", 1)[0]
+        if base in seen_zap_targets or len(zap_targets) >= _MAX_ZAP_ENDPOINT_TARGETS:
+            continue
+        seen_zap_targets.add(base)
+        zap_targets.append(base)
 
-    if policy.allow_active_web_verification:
+    for zap_url in zap_targets:
         try:
-            active = run_active_scan_if_authorised(target.url, asset_id=target.asset_id, scope_guard=scope_guard)
-            tool_executions.append({
-                "tool": "zap_active", "target": target.url,
-                "ran": active.active_scan_run, "used_fixture": active.used_fixture,
-            })
-            if active.error:
-                errors.append(f"zap_active({target.url}): {active.error}")
-            active_findings, active_evidence = findings_from_zap_alerts(active.alerts, assessment_id=assessment_id, asset_id=target.asset_id)
-            findings.extend(active_findings)
-            evidence.extend(active_evidence)
+            passive = run_passive_scan(zap_url, asset_id=target.asset_id, scope_guard=scope_guard)
+            tool_executions.append({"tool": "zap_passive", "target": zap_url, "used_fixture": passive.used_fixture})
+            if passive.error:
+                errors.append(f"zap_passive({zap_url}): {passive.error}")
+            zap_findings, zap_evidence = findings_from_zap_alerts(passive.alerts, assessment_id=assessment_id, asset_id=target.asset_id)
+            findings.extend(zap_findings)
+            evidence.extend(zap_evidence)
         except (ScopeViolationError, ToolExecutionError) as exc:
-            errors.append(f"zap_active({target.url}): {exc}")
+            errors.append(f"zap_passive({zap_url}): {exc}")
+
+        if policy.allow_active_web_verification:
+            try:
+                active = run_active_scan_if_authorised(zap_url, asset_id=target.asset_id, scope_guard=scope_guard)
+                tool_executions.append({
+                    "tool": "zap_active", "target": zap_url,
+                    "ran": active.active_scan_run, "used_fixture": active.used_fixture,
+                })
+                if active.error:
+                    errors.append(f"zap_active({zap_url}): {active.error}")
+                active_findings, active_evidence = findings_from_zap_alerts(active.alerts, assessment_id=assessment_id, asset_id=target.asset_id)
+                findings.extend(active_findings)
+                evidence.extend(active_evidence)
+            except (ScopeViolationError, ToolExecutionError) as exc:
+                errors.append(f"zap_active({zap_url}): {exc}")
 
     # Stage E: generic hidden-path content discovery -- resource discovery only; see content_discovery.py's
     # own docstring for why this never extracts a credential itself.
