@@ -60,14 +60,16 @@ class Candidate:
     backing_findings_count: int = 0
     next_attempt_count: int = 1
 
-    def score(self, weights: dict[str, float]) -> float:
+    def score(self, weights: dict[str, float] | None = None) -> float:
+        weights = weights or DEFAULT_WEIGHTS
         total = 0.0
         for name, weight in weights.items():
             value = self.factors.get(name, 0.0)
             total += -weight * value if name == "execution_cost" else weight * value
         return total
 
-    def explanation(self, weights: dict[str, float]) -> dict:
+    def explanation(self, weights: dict[str, float] | None = None) -> dict:
+        weights = weights or DEFAULT_WEIGHTS
         contributions = {
             name: (-weights[name] * self.factors.get(name, 0.0) if name == "execution_cost"
                    else weights[name] * self.factors.get(name, 0.0))
@@ -179,6 +181,15 @@ def generate_candidates(
     return candidates
 
 
+def rank_candidates(candidates: list[Candidate], weights: dict[str, float] | None = None) -> list[Candidate]:
+    """Highest score first, deterministic tie-break on candidate_id so re-running against unchanged
+    evidence always orders the same way -- the one place both `select_next` (one winner) and a concurrent
+    dispatcher (the top `max_inflight` winners) get their ordering from, so they can never disagree about
+    which candidate is "next" after the first."""
+    weights = weights or DEFAULT_WEIGHTS
+    return sorted(candidates, key=lambda c: (-c.score(weights), c.candidate_id))
+
+
 def select_next(candidates: list[Candidate], weights: dict[str, float] | None = None) -> tuple[Candidate | None, dict]:
     """Highest-scoring eligible candidate, with a persisted explanation. Deterministic tie-break on
     candidate_id so re-running against unchanged evidence always picks the same task."""
@@ -186,7 +197,7 @@ def select_next(candidates: list[Candidate], weights: dict[str, float] | None = 
     if not candidates:
         return None, {"reason": "no eligible candidate: nothing in the current evidence/graph qualifies "
                                "for investigation under the active policy and scope"}
-    ranked = sorted(candidates, key=lambda c: (-c.score(weights), c.candidate_id))
+    ranked = rank_candidates(candidates, weights)
     winner = ranked[0]
     return winner, {
         "selected": winner.explanation(weights),

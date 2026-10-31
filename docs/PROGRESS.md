@@ -729,3 +729,70 @@ the authorised `NetworkGraph`.
   concurrency tests (web/network/binary and orchestrator-level), and the
   load/scaling demonstration across 1/2/4/8+ workers. None of this is
   claimed as done.
+
+- **Entry 11** — Continued the same 14-item request with items 3 and 4
+  (task-fingerprint deduplication, and turning the autonomous
+  orchestrator into a genuine concurrent scheduler). Item 2 (configurable
+  scope partitioning) is still not done.
+
+  **Item 3 — deduplication, done at the reservation layer, not by
+  inspection**: added `repository.try_reserve_task()`
+  (`app/database/repository.py`) as the orchestrator-side equivalent of
+  Probe's `Hub.lease()`/`claim_task()` fix from Entry 10. A naive
+  "does `task_id` already exist -> reject" check would have been WRONG
+  here and was caught before landing: `task_id` is a deterministic
+  fingerprint of (assessment + agent/surface + target/service) but is
+  *not* attempt-scoped, and the scheduler's own novelty logic
+  legitimately re-selects the same candidate once new evidence justifies
+  a fresh attempt (item 6 of the spec: "new evidence may create a
+  legitimate new follow-up task"). So the real rule implemented is: a
+  brand-new `task_id` reserves via a plain `INSERT` (the primary key is
+  what the database serialises concurrent callers on — not a
+  SELECT-then-INSERT); an existing `task_id` can only be *reclaimed* by
+  an atomic `UPDATE ... WHERE status != 'running'` with its own rowcount
+  checked, so a task someone else already has `RUNNING` can never be
+  claimed twice, while a *finished* task's `task_id` can legitimately be
+  reclaimed for a new attempt. Verified with real threads
+  (`tests/test_task_reservation.py`): 20 threads racing one brand-new
+  `task_id` (exactly one wins), 10 distinct `task_id`s racing
+  independently (all win, no cross-contention), and 15 threads racing a
+  reclaim of one finished `task_id` (exactly one wins) — run 3x, no
+  flakiness.
+
+  **Item 4 — a real concurrent scheduler, not a bigger for-loop**:
+  `run_next_iteration()` used to select exactly one candidate and run it
+  to completion before returning, so three independent eligible services
+  could only ever be dispatched one iteration apart. Refactored
+  `app/orchestrator/autonomous_loop.py`: extracted the
+  reserve/dispatch/validate/persist body shared by both paths into
+  `_execute_objective()`; `run_next_iteration()` now reserves via
+  `try_reserve_task` before running (so it also benefits from the same
+  dedup, for free); added `run_concurrent_iteration(..., max_inflight=4)`
+  which ranks every eligible candidate
+  (`scheduler.rank_candidates`, factored out of `select_next`'s own
+  sort), atomically reserves up to `max_inflight` of the
+  highest-ranked ones, then runs every one that was actually won
+  **concurrently**, each in its own thread, each with its *own* fresh
+  `ScopeGuard` (cheap, no I/O) rather than one shared across threads —
+  so concurrent tool-invocation logging from different objectives is
+  never interleaved onto the same audit log.
+
+  **Verified it is actually concurrent, not merely correct**
+  (`tests/test_concurrent_scheduler.py`, agent calls stubbed with a
+  0.3s sleep so wall-clock timing can tell real parallel dispatch apart
+  from a relabelled sequential loop): four independent candidates with
+  `max_inflight=4` complete in ~0.3s total, not ~1.2s (asserted under a
+  2x margin so it still fails hard on a regression to one-at-a-time);
+  `max_inflight=2` runs exactly 2 of 4 candidates, and a second call
+  picks up the other 2 without re-running the first pair; three
+  overlapping `run_concurrent_iteration` calls fired from separate
+  threads at once (simulating overlapping scheduler ticks) still execute
+  each of four candidates exactly once — the agent stub's own call
+  counter confirms 4 invocations, not more. Full suite: **476 passed,
+  4 skipped**.
+
+  **Still not done**: item 2 (configurable partitioning by worker
+  count), and everything else items 5-14 list (multi-worker pools,
+  resource limits, PostgreSQL, the generic evidence-graph model, the
+  multi-worker CLI, the remaining concurrency tests, and the
+  load/scaling demonstration).

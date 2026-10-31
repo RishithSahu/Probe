@@ -6,7 +6,8 @@ via `app.database.session.session_scope`.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AssessmentNotFoundError
@@ -19,6 +20,7 @@ from app.core.schemas import (
     Evidence,
     Finding,
     NetworkGraph,
+    TaskStatus,
 )
 from app.core.scope_guard import ToolInvocationRecord
 from app.database.inventory import persist_network_graph
@@ -127,6 +129,54 @@ def upsert_agent_task(db: Session, task: AgentTask) -> None:
     record.evidence_ids = task.evidence_ids
     record.verification_status = task.verification_status
     db.flush()
+
+
+def try_reserve_task(db: Session, task: AgentTask) -> bool:
+    """Atomically claim `task.task_id` for THIS caller, so a concurrent scheduler dispatching several
+    candidates at once can never run the same one twice. `task.task_id` is a deterministic fingerprint of
+    the unit of work (assessment + agent/surface + target/service -- see
+    app.orchestrator.scheduler.Candidate.candidate_id and autonomous_loop's task_id construction), but it is
+    NOT attempt-scoped: the scheduler's own novelty/retry logic can legitimately select the SAME task_id
+    again later once new evidence justifies a fresh attempt (item 6 of the concurrency spec: "new evidence
+    may create a legitimate new follow-up task"). So "already exists" alone must not permanently block it --
+    only "already RUNNING" may.
+
+    Two atomic paths, neither of them a SELECT-then-write:
+      1. A brand-new task_id: a plain INSERT, which only one of several racing callers can ever have
+         succeed (the primary key is what the database itself serialises on, across sessions/connections --
+         see probe/store.py's claim_task for the same pattern against SQLite's own write lock).
+      2. A task_id that already exists (from a prior, now-finished attempt, or from another caller
+         currently racing this same reservation): an UPDATE ... WHERE status != 'running', whose rowcount
+         is checked exactly like Probe's Hub.lease() does -- it reclaims a terminal task for a new attempt,
+         but a task some other caller already has RUNNING matches no row and rowcount is 0.
+    Returns True iff THIS call now owns the task (the caller must execute it); False means it is currently
+    running under somebody else's reservation (the caller must skip it, not retry)."""
+    record = AgentTaskRecord(
+        task_id=task.task_id, assessment_id=task.assessment_id, agent_id=task.agent_id.value,
+        task_type=task.task_type, input_data=task.input_data, status=task.status.value,
+        output_data=task.output_data, parent_task_id=task.parent_task_id, initiated_by=task.initiated_by,
+        execution_method=task.execution_method, started_at=task.started_at,
+        verification_status=task.verification_status,
+    )
+    db.add(record)
+    try:
+        db.flush()
+        return True
+    except IntegrityError:
+        db.rollback()
+        result = db.execute(
+            update(AgentTaskRecord)
+            .where(AgentTaskRecord.task_id == task.task_id, AgentTaskRecord.status != TaskStatus.RUNNING.value)
+            .values(
+                assessment_id=task.assessment_id, agent_id=task.agent_id.value, task_type=task.task_type,
+                input_data=task.input_data, status=task.status.value, output_data=None, error_message=None,
+                started_at=task.started_at, completed_at=None, parent_task_id=task.parent_task_id,
+                initiated_by=task.initiated_by, execution_method=task.execution_method,
+                evidence_ids=None, verification_status=None,
+            )
+        )
+        db.flush()
+        return result.rowcount == 1
 
 
 def list_agent_tasks(db: Session, assessment_id: str) -> list[AgentTaskRecord]:
