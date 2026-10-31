@@ -1,6 +1,6 @@
 # Binary Analysis Agent: Ghidra integration report
 
-Scope: 192.168.60.0/24, discovery/analysis stage only. No authentication attempt was made against any
+Scope: 10.20.30.0/24, discovery/analysis stage only. No authentication attempt was made against any
 service, Game Zone (TCP 8833) included, and nothing here expands the authorised scope.
 
 ## A. Headless Ghidra integration

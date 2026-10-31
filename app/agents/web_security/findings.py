@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import uuid
 from typing import Iterable
+from urllib.parse import parse_qs, urlsplit
 
+from app.agents.web_security.crawler import DiscoveredEndpoint
 from app.agents.web_security.fingerprint import FingerprintResult
 from app.agents.web_security.zap_integration import ZapAlert
 from app.core.schemas import (
@@ -22,6 +24,13 @@ from app.core.schemas import (
     Severity,
     Surface,
 )
+
+# Query-parameter names generically associated with a server reading a file named
+# by the request (local file inclusion / path traversal), independent of any one
+# application -- the same class of signal static_analysis.py's _UNSAFE_FUNCTIONS
+# heuristic uses for binaries, applied here to endpoints Katana discovers that a
+# plain fingerprint of the root page would never see.
+_FILE_READ_PARAM_NAMES = ("file", "page", "view", "template", "document", "doc", "path", "include", "filename", "load")
 
 _ZAP_RISK_TO_SEVERITY = {
     "informational": Severity.INFO,
@@ -185,4 +194,70 @@ def findings_from_zap_alerts(
                 detection_method="zap_active_scan" if alert.is_active_rule else "zap_passive_scan",
             )
         )
+    return findings, evidence
+
+
+def findings_from_discovered_endpoints(
+    endpoints: Iterable[DiscoveredEndpoint], *, assessment_id: str, asset_id: str
+) -> tuple[list[Finding], list[Evidence]]:
+    """Katana finds real endpoints a plain fingerprint of the root page never sees -- until now, that
+    discovery fed only report metadata (`discovered_endpoints`) and never became a Finding, unlike Ghidra's
+    static_analysis.py, which flags its own signal. This is the Web Agent's equivalent: a generic,
+    site-independent heuristic over each endpoint's own query-parameter NAMES (never their values, never page
+    content), flagging one `suspected`, low-confidence finding per matching parameter per endpoint -- a
+    starting point for manual review, exactly like the binary agent's unsafe-function flags, never a claim
+    that the parameter is actually exploitable."""
+    findings: list[Finding] = []
+    evidence: list[Evidence] = []
+    seen: set[tuple[str, str]] = set()  # (url-without-query, param) -- one finding per distinct (endpoint, param)
+
+    for ep in endpoints:
+        query = parse_qs(urlsplit(ep.url).query)
+        for param in query:
+            if param.lower() not in _FILE_READ_PARAM_NAMES:
+                continue
+            base_url = ep.url.split("?", 1)[0]
+            key = (base_url, param.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            finding_id = _new_id("WEB")
+            evidence_id = _new_id("EVIDENCE")
+            evidence.append(
+                Evidence(
+                    evidence_id=evidence_id,
+                    finding_id=finding_id,
+                    evidence_type="discovered_endpoint",
+                    source_tool="katana",
+                    description=f"Endpoint discovered by Katana with a file-read-shaped parameter: {ep.url}",
+                    raw_data={"url": ep.url, "method": ep.method, "parameter": param},
+                )
+            )
+            findings.append(
+                Finding(
+                    finding_id=finding_id,
+                    assessment_id=assessment_id,
+                    agent_id=AgentId.WEB_SECURITY,
+                    surface=Surface.WEB,
+                    asset_id=asset_id,
+                    affected_url=ep.url,
+                    parameter=param,
+                    title=f"Potential local file inclusion / path traversal parameter '{param}'",
+                    description=(
+                        f"The endpoint {base_url!r} was discovered with a query parameter named {param!r}, a "
+                        "name generically associated with a server reading a file named by the request "
+                        "(local file inclusion / path traversal). This does not by itself prove the parameter "
+                        "is exploitable -- it is flagged for manual review of whether its value controls a "
+                        "file path and whether that path is validated."
+                    ),
+                    severity=Severity.MEDIUM,
+                    confidence=Confidence.LOW,
+                    evidence_refs=[evidence_id],
+                    remediation="Review whether this parameter's value reaches a filesystem read, and if so, "
+                    "validate it against an allow-list rather than passing it through unchecked.",
+                    ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS,
+                    detection_method="katana_endpoint_param_heuristic",
+                )
+            )
     return findings, evidence

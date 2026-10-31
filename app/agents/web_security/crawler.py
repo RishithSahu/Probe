@@ -84,10 +84,16 @@ def _check_scope_capabilities() -> None:
 
 
 def _parse_katana_jsonl(output: str) -> list[DiscoveredEndpoint]:
-    """Katana's `-jsonl` output is one JSON object per line, each with at
-    least an `endpoint`/`url` field and optionally a `request`/`response`
-    block describing method/params/forms. Parsed defensively since output
-    shape can vary slightly across Katana versions."""
+    """Katana's `-jsonl` output is one JSON object per line. Real output (verified
+    against katana v1.8.0) nests the URL under `request.endpoint`/`request.url`,
+    not at the top level — a top-level `endpoint`/`url` key is also accepted for
+    forward/backward compatibility with other Katana versions, but checked second
+    so it never silently shadows the real field. BUG FIX: this previously only
+    checked the top-level keys, which don't exist in real katana output at all —
+    every real crawl silently parsed to zero endpoints, with no error anywhere,
+    while a fixture-fallback crawl (whose synthetic records DO use a top-level
+    `url` key) parsed fine, making the bug invisible without a real katana binary
+    to test against."""
     endpoints: list[DiscoveredEndpoint] = []
     for line in output.splitlines():
         line = line.strip()
@@ -98,10 +104,10 @@ def _parse_katana_jsonl(output: str) -> list[DiscoveredEndpoint]:
         except json.JSONDecodeError:
             logger.warning("skipping unparseable katana output line")
             continue
-        url = record.get("endpoint") or record.get("url")
+        request = record.get("request", {}) or {}
+        url = request.get("endpoint") or request.get("url") or record.get("endpoint") or record.get("url")
         if not url:
             continue
-        request = record.get("request", {}) or {}
         method = request.get("method", "GET")
         query_params = []
         if "?" in url:
@@ -162,25 +168,45 @@ def crawl(
     # parseable output. No flag here allows following out-of-scope hosts;
     # scope is enforced redundantly by the Scope Guard on every discovered
     # URL below, not just trusted to Katana's own host-matching.
+    #
+    # BUG FIX: `-dr`/`-disable-redirects` previously sat alongside `-cs` here,
+    # with the comment "redirects must not escape the origin before output
+    # filtering" — but `-dr` disables following ANY redirect, in-scope or not,
+    # not just out-of-scope ones; `-cs` (crawl-scope regex) already bounds
+    # exactly that, on its own. The practical effect was that katana could
+    # never crawl past a redirecting entry page (a common, unremarkable
+    # pattern — this exact real lab target's own homepage 302s to
+    # /index.php?p=), silently truncating every real crawl to one page. `-dr`
+    # is removed; `-cs` alone keeps redirects from leaving the authorised
+    # origin, and the Scope Guard re-checks every resulting URL regardless.
     args = [
         settings.katana_binary,
         "-u", base_url,
         "-d", str(depth),
         "-rl", str(max(1, int(rate_per_second))),
         "-cs", origin_scope,
-        "-dr",  # redirects must not escape the origin before output filtering
         "-c", "1",
         "-p", "1",
         "-jc",  # include form/query-param-bearing endpoints
         "-silent",
         "-jsonl",
     ]
+    # BUG FIX: the old formula (max(30, depth*30), ignoring rate_per_second) gave
+    # 60s at depth=2 — a real crawl of a real, modestly-sized site at the default
+    # rate (5 req/s) was independently measured at ~84s to complete, so this
+    # silently timed out (raising ToolExecutionError, zero endpoints returned, no
+    # crash) on realistic targets while passing every test against the fixture
+    # fallback or a tiny fixture-shaped local server. Scaled by depth AND
+    # inversely by rate (a slower, more polite crawl legitimately needs more
+    # wall-clock time for the same page count); the depth=2/rate=5 baseline
+    # keeps comfortable headroom over the measured 84s.
+    timeout_seconds = max(120.0, depth * 90.0) * (5.0 / max(rate_per_second, 1.0))
     try:
         proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=max(30.0, depth * 30.0), check=False,
+            args, capture_output=True, text=True, timeout=timeout_seconds, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ToolExecutionError(f"katana timed out crawling {base_url}") from exc
+        raise ToolExecutionError(f"katana timed out crawling {base_url} after {timeout_seconds:.0f}s") from exc
 
     out_file.write_text(proc.stdout, encoding="utf-8")
     if proc.returncode != 0:

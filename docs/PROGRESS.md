@@ -28,6 +28,16 @@ when.
   real tool calls, even with other permissions enabled. Every example in
   this repo (README, synthetic demo) already sets it explicitly.
 - **Not yet committed to git** as of this entry — see `git status`.
+- **Scope division (as of this entry)**: the teammate is independently
+  building the content-discovery → binary-artifact-harvesting →
+  embedded-secret-extraction → single-attempt-console-auth chain in
+  `app/` (new orchestrator nodes on the web + binary agents) to chase the
+  CTF flag behind the `10.20.30.139:8833` console found during Probe
+  verification. That whole chain is their scope by agreement — do not add
+  competing/duplicate nodes for it here. This session's `app/` work stays
+  on everything else (reporting, orchestrator plumbing, Probe
+  integration/verification, remaining Master-Spec gaps not in that list:
+  SSE event stream, task ledger, binary sandbox isolation).
 
 ## Known environment limitations (not application bugs)
 
@@ -314,3 +324,260 @@ the authorised `NetworkGraph`.
   Architecture-level findings that are NOT yet fixed (deliberately —
   they're design/process decisions, not drop-in code changes) are listed
   separately below under "Fundamental issues raised but not yet acted on".
+
+- **Entry 4** — Independently verified the teammate's newest Probe commit
+  (hidden-HTTP-service discovery via `http-inventory`/`observe_http.py`)
+  rather than trusting the self-report, per request. Merge was clean
+  (fast-forward, no conflicts), full suite green (343 passed). Ran a real
+  live discovery pass against the authorised `/24` to reproduce the
+  claimed results directly:
+  - **Confirmed**: the headline claim reproduces. `10.20.30.139:80`
+    (a wiki page) names an internal endpoint, `10.20.30.139:8833`, and
+    the engine's `reported-endpoint-connect` follow-up independently
+    connects to port 8833 and captures its real banner ("GAME ZONE" CTF
+    service) — stored as both a `leads` row and a `ports` row with the
+    connect-banner evidence attached. The attribution/provenance chain
+    (which page referenced which address, on what basis) is intact in the
+    stored lead record.
+  - **New bug found (not fixed — teammate's component, flagged per the
+    standing instruction not to touch Probe's own scanning code without
+    being asked to fix it, only diagnose it):** the live run died silently
+    partway through the `fingerprint` phase (UDP + OS nmap scans), with no
+    traceback and no final summary ever printed. Root-caused via the
+    auditor's own evidence file, not guesswork: `audit-violation.json` in
+    the run's data dir records `"independent scope enforcement cannot be
+    verified: ... windows-program-scope.ps1 ... timed out after 12
+    seconds"`. The independent egress auditor (`probe/audit.py`)
+    periodically re-verifies the Windows firewall egress rule by shelling
+    out to a PowerShell script with a hard 12s timeout; under the CPU load
+    of two concurrent nmap subprocesses (`-sU` and `-O`, each budgeted
+    45s) that readback call ran long, the auditor treated the timeout
+    itself as an unverifiable-safety condition (correctly, by its own
+    fail-closed design) and killed the main process with `SIGTERM` +
+    `os._exit(87)` in the auditor — a false-positive safety trip, not an
+    actual out-of-scope probe or scope violation. This is why the run's
+    own `run.log` just stops mid-phase with no error line: the kill is a
+    raw `SIGTERM` to the main process, which has no custom handler, so
+    nothing more gets logged. (A second, separate red herring: the shell
+    pipeline used to capture output, `... | tee f | tail -200`, reports
+    `tail`'s exit code, not the killed Python process's — so "exited with
+    code 0" in the captured transcript did not mean what it looked like.)
+    Net effect: as written, any sufficiently loaded host risks losing a
+    run's UDP-scan/OS-fingerprint results (and the final summary) to this
+    false trip — confirmed by `probe.db` from this run itself showing 0
+    UDP-proto rows among its 233 stored ports. Likely fix on Probe's side:
+    either raise the readback timeout, treat a timeout as "retry once"
+    rather than an immediate fail-closed kill, or de-prioritize/stagger the
+    readback check relative to concurrent nmap subprocesses — a decision
+    for the teammate to make, flagged here rather than changed.
+
+- **Entry 5** — Full post-probe pipeline (`app/`: web agent, Network
+  Vulnerability Detective, orchestrator, reporting) run end-to-end against
+  the real, already-completed lab-network scan (166 real hosts, 233 real
+  TCP services) instead of the bundled synthetic demo graph, per request
+  ("make sure it works correctly on lab network ... even the reporting
+  part"). Full writeup, data flow, and tech stack: see new
+  `docs/APP_ARCHITECTURE.md`. Headline results: scope enforcement correctly
+  refused dozens of real-but-unapproved web origins across the lab; `httpx`
+  produced a real, auto-confirmed finding against the real wiki host;
+  `katana`/ZAP correctly fell back to fixtures (not installed locally) and
+  that fallback was honestly flagged in both the JSON and PDF reports; both
+  report formats generated correctly from real data.
+  - **Bug found and fixed**: the Network Vulnerability Detective silently
+    skipped unmistakable services (ssh/smb/postgresql) whenever Probe's
+    graph carried no `service_name` for the port — the dispatch gate in
+    both `agent.py` and `checks.py` keyed purely off that string, with no
+    fallback. Fixed with a small, local, IANA-registered port→name
+    fallback (`_PORT_NAME_FALLBACK`), consulted only when the graph
+    supplies no name, never overriding one it does supply, and recorded
+    transparently per-check as `assumed_service_name`. Verified via the
+    same real-lab run: real protocol checks executed went from 2 to 91
+    after the fix (all against genuinely real lab services), correctly
+    reporting zero flagged findings — an honest negative, not a skipped
+    one. All 14 of the agent's existing tests, plus the full 343-test
+    suite, still pass.
+
+- **Entry 6** — Correction and honest re-verification, after being called
+  out (rightly) for overstating Entry 5: that run only exercised the Web
+  Agent and Network Vulnerability Detective — `allow_binary_analysis` was
+  `False` and `binary_paths` was empty, so **the Binary Analysis Agent never
+  ran at all**, despite the write-up implying all three agents were
+  verified. Also, the whole run was in-process, not through the actual
+  `docker-compose` deployment, so nothing about the containerised path had
+  been checked.
+  - **Tried the containers next; found a real build-breaking bug.**
+    `docker compose build` failed outright on `binary-agent`:
+    `Dockerfile.binary`'s final stage pins `FROM python:3.12-slim`, whose
+    Debian base image recently rolled from `bookworm` to `trixie`, which
+    dropped the `openjdk-17-jre-headless` package (only `openjdk-21-*`
+    remains) — so `apt-get install ... openjdk-17-jre-headless` fails with
+    "no installation candidate", every time, on a clean build. The
+    container could never have been exercised before this was found. Fixed
+    by pinning `python:3.12-slim-bookworm` explicitly instead of floating
+    `python:3.12-slim`, keeping the JRE version Ghidra 11.1.2 was actually
+    built against.
+  - **Then asked to stop using Docker entirely and run natively.** Dropped
+    the containerised path for this verification (the Dockerfile.binary fix
+    stays in the repo — it's a real bug either way) and instead confirmed
+    every tool `app/` depends on is genuinely present on this machine:
+    `readelf`/`objdump` (MinGW), `file`, a JDK, and `gcc`. Compiled a real,
+    deliberately-weak C program (`vuln.exe`: a real `strcpy`/`gets`/`system`
+    call chain, a real embedded secret-shaped string) and ran a true
+    3-agent, in-process, no-Docker assessment against it plus the same real
+    lab network graph:
+    - **Web Agent**: ran exactly as in Entry 5 (real `httpx`, fixture
+      `katana`/ZAP, honestly flagged).
+    - **Network Vulnerability Detective**: 91 real protocol checks against
+      real lab services (ssh/mysql/postgresql/smb), all correctly
+      zero-flagged.
+    - **Binary Analysis Agent: ran for the first time, genuinely.** Stage A
+      (`file`/`readelf`/`checksec` — binary identification and hardening
+      properties) ran for real against the real compiled `vuln.exe` and
+      correctly identified it as `PE` format with no errors. Stage B
+      (Ghidra function/string/import extraction) fell back to its synthetic
+      fixture, because **Ghidra itself is not installed on this machine** —
+      a genuine environment gap, not a code bug, and already handled by the
+      code exactly as designed: `used_fixture=True`, surfaced in
+      `data_integrity.fixture_tools_used` (`["ghidra", "katana",
+      "zap_passive"]`) in both the JSON and PDF reports. The four resulting
+      binary findings (unsafe `strcpy`/`system` usage, an embedded-secret
+      string, a suspicious-input-handling function) therefore describe the
+      fixture's canned program, not an independently-verified read of
+      `vuln.exe`'s actual content, even though they happen to resemble it —
+      that resemblance is not evidence, and the report says so.
+  - **Net honest status**: all three agents now confirmed to actually run,
+    in-process, no Docker. Two of three (Web, Network Vulnerability
+    Detective) produced fully real, non-fixture-dependent results against
+    genuine lab targets. The third (Binary Analysis) is real end-to-end for
+    Stage A; Stage B/C are only verified via fixture pending a local Ghidra
+    install, which has not been attempted.
+  - **On network-discovery completeness** (separately raised, "the
+    network owner has already given the IP address but the tool can't probe
+    every device inside it"): re-checked the Probe scan's own recorded
+    stats directly rather than re-asserting anything. Of 253 addresses in
+    the authorised `/24`, 166 answered something and were classified; 87
+    never answered any probe at a single tier (ARP through UDP-to-closed-
+    port) and are reported as "undetectable with this probe set," which is
+    this tool's honest terminology for "no evidence of a device here," not
+    proof one is absent; 12 more were seen but ran out of the scan's time
+    budget before full identification. Discovery itself converged normally
+    (the adaptive round-robin stopped because a further round added no new
+    evidence — not because of an error). Separately, the Entry 4
+    auditor-timeout bug killed a *later*, different phase (UDP/OS service
+    fingerprinting of already-discovered hosts) — that is a real, already-
+    diagnosed-and-flagged gap in service enrichment, not in device
+    discovery itself, and the two should not be conflated.
+
+- **Entry 7** — Pulled the teammate's latest commit (`a6eb3c0`, "Update
+  project implementation and tests") into `main`. Clean fast-forward, no
+  divergence, no conflicts with this session's uncommitted work — the
+  commits don't touch any of the same files. This is their full
+  content-discovery → binary-harvesting → credential-recovery →
+  console-auth chain (see §1's scope split): new
+  `app/agents/web_security/content_discovery.py`,
+  `app/agents/binary_analysis/{acquisition,discovered_artifact,
+  credential_recovery,pyghidra_adapter,raw_strings}.py`,
+  `app/agents/network_security/console_auth.py`, plus new inventory/
+  protected-storage/completeness infrastructure and ~15 new test files.
+  `docs/BINARY_ANALYSIS_REPORT.md` (their own write-up) confirms they
+  followed through on the redesign reviewed earlier in this log: scope
+  10.20.30.0/24 → stated explicitly as "discovery/analysis stage only,
+  no authentication attempt was made."
+  - Installed the one new dependency (`pypdf==6.15.0`).
+  - Two test failures after the pull, both chased down rather than assumed:
+    one was this session's own stale, gitignored local `evidence/ape.db`
+    (accumulated across many repeated local `pytest` runs today) tripping
+    a new, stricter duplicate-asset-ID guard their merge added to
+    `app/database/inventory.py` — deleted the local file (not repo state)
+    and it passed cleanly. The other was real: their new
+    `docs/BINARY_ANALYSIS_REPORT.md` itself violates this repo's own
+    generic/no-site-specific-content test (a literal `10.20.30.` where
+    the rest of the repo uses a neutral example range) — fixed with the
+    same one-line wording change already applied elsewhere in this log.
+  - Full suite after the pull and both fixes: **445 passed, 4 skipped**
+    (all four skips are `test_credential_recovery.py` cases that need a
+    real Ghidra install — the same honestly-flagged gap noted in Entry 6,
+    now confirmed shared by their code too, not specific to this
+    environment).
+  - No action taken on the new chain itself — still their scope per the
+    agreement in §1/Entry 4; this entry is the pull + the two fixes needed
+    to get the merged tree back to green, nothing more.
+
+- **Entry 8** — Investigated the explicit complaint "my friend pulled this
+  code and the vulnerability detection pipeline isn't flagging anything;
+  make sure Katana is genuinely downloaded and used, the way Ghidra is."
+  That comparison turned out to be exactly right — the gap is real, and
+  Katana really had never been run against anything but its own fixture on
+  this machine before now (confirmed: `katana` was not on PATH at the start
+  of this entry). Installed it for real (`go install
+  .../projectdiscovery/katana/cmd/katana@latest`, Go was already present),
+  confirmed the real binary (v1.8.0) resolves and runs. Three real, separate
+  bugs were then found by testing it against the real lab target, not by
+  inspection alone — each one independently explains why a real katana
+  install would still silently produce nothing:
+  1. **`_parse_katana_jsonl` schema mismatch.** It read a top-level
+     `endpoint`/`url` key; real Katana's JSONL nests the URL under
+     `request.endpoint`. Every real crawl parsed to zero endpoints, with no
+     error anywhere — only the *fixture's* synthetic records (which do use
+     a top-level key) ever parsed successfully, which is exactly why this
+     was invisible without a real binary to test against. Fixed to check
+     `request.endpoint`/`request.url` first, falling back to the top-level
+     keys for compatibility.
+  2. **`-dr`/`-disable-redirects` silently capped every real crawl at one
+     page.** The flag disables following *any* redirect, not just
+     out-of-scope ones — `-cs` (crawl-scope regex) already bounds redirects
+     to the authorised origin on its own. The real lab target's own
+     homepage 302s to `/index.php?p=`, an unremarkable, common pattern; with
+     `-dr` present, Katana could never get past it. Removed `-dr`;
+     `-cs` plus the existing Scope Guard re-check on every resulting URL is
+     the correct and sufficient bound.
+  3. **Timeout too short for a real crawl.** The old formula gave 60s at
+     depth=2; an actual, measured real crawl of the real lab target at the
+     default rate took ~84s to complete. Rescaled by depth and (inversely)
+     by rate, with comfortable headroom over the measured baseline.
+  - **Verified all three fixes together**: a real crawl against the real
+    lab host (`10.20.30.139`) returned **24 genuinely new, in-scope
+    endpoints** (`used_fixture=False`) including an `index.php?p=&view=...`
+    file-read-shaped parameter, `/backups`, `/ops`, and several real,
+    previously-hidden files (`README.txt`, `netops-handover.txt`,
+    `edr_log_generator.py`) — the Scope Guard also correctly filtered out
+    ~40 real but out-of-scope third-party CDN/script URLs Katana also
+    found. Full suite re-run after the fix: **445 passed, 4 skipped**
+    (one pre-existing test asserted the buggy `-dr` behavior as a
+    requirement; updated it to assert the corrected behavior instead).
+  - **Second gap, also matching the user's Ghidra comparison exactly**:
+    Katana's discoveries fed only report metadata
+    (`discovered_endpoints`) and were never turned into a `Finding` at
+    all — unlike Ghidra's `static_analysis.py`, which flags its own
+    signal. Added `findings_from_discovered_endpoints` (new, in
+    `web_security/findings.py`): a generic, site-independent heuristic
+    over each discovered endpoint's own query-PARAMETER NAMES (never
+    values, never page content) — `file`, `page`, `view`, `path`,
+    `template`, etc. — flagging one `suspected`, low-confidence,
+    medium-severity finding per matching parameter, the same posture as
+    the binary agent's unsafe-function flags (signal for review, not
+    proof). Verified against the real, already-captured 63-endpoint real
+    crawl output: it correctly flags the real `view=` parameter found
+    above.
+  - **Not fixed, flagged honestly**: ZAP's passive/active scan still only
+    opens the single root `target.url`, never Katana's discovered
+    endpoints — so ZAP-sourced findings still only ever cover the one
+    page, regardless of how much Katana discovers. Closing this
+    (ZAP-scanning each discovered endpoint, not just the root) is the
+    next real step toward full parity with the binary side, not done
+    here.
+  - **Environment note**: the real lab target visibly degraded (one
+    request returned `502`, a later crawl found only 1 endpoint instead
+    of 24) partway through this verification, almost certainly from the
+    repeated real crawl load this entry itself generated against a small
+    shared lab service — not a pipeline defect. Stopped repeated live
+    runs once this was apparent; the 24-endpoint/flagged-finding result
+    above was already captured and is not retracted by the later
+    flakiness.
+  - **Setup note for whoever runs this**: Katana now needs to be
+    findable the same way Ghidra does — either on `PATH` or via
+    `APE_KATANA_BINARY` pointing at the binary directly. It's been
+    installed to this machine's Go bin and added to this user's
+    persistent `PATH`, but a shell/session already running when that
+    change was made won't see it until restarted — explicit setup, like
+    `APE_GHIDRA_INSTALL_DIR`, not something the code can detect for you.

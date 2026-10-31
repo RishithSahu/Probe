@@ -15,7 +15,11 @@ from pathlib import Path
 from app.adapters.authorisation_grants import headers_for_url
 from app.agents.web_security.content_discovery import discover_hidden_paths
 from app.agents.web_security.crawler import crawl
-from app.agents.web_security.findings import findings_from_fingerprint, findings_from_zap_alerts
+from app.agents.web_security.findings import (
+    findings_from_discovered_endpoints,
+    findings_from_fingerprint,
+    findings_from_zap_alerts,
+)
 from app.agents.web_security.fingerprint import fingerprint_url
 from app.agents.web_security.zap_integration import run_active_scan_if_authorised, run_passive_scan
 from app.core.config import settings
@@ -91,6 +95,13 @@ def assess_target(
                 "used_fixture": crawl_result.used_fixture, "endpoint_count": len(crawl_result.endpoints),
             })
             endpoints = [ep.url for ep in crawl_result.endpoints]
+            # Katana's discoveries previously fed only report metadata and never became a Finding, unlike
+            # Ghidra's analysis -- see findings_from_discovered_endpoints's own docstring.
+            ep_findings, ep_evidence = findings_from_discovered_endpoints(
+                crawl_result.endpoints, assessment_id=assessment_id, asset_id=target.asset_id,
+            )
+            findings.extend(ep_findings)
+            evidence.extend(ep_evidence)
         except (ScopeViolationError, ToolExecutionError) as exc:
             errors.append(f"crawl({target.url}): {exc}")
 

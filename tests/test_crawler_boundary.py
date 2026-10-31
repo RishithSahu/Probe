@@ -48,7 +48,12 @@ def test_crawl_passes_controls_before_work_and_filters_external_output(monkeypat
     monkeypatch.setattr(crawler.subprocess, "run", run)
     result = crawler.crawl("http://example.test/", asset_id="HOST", scope_guard=guard(), depth=1, rate_per_second=1, output_dir=tmp_path)
     assert "-h" in calls[0]
-    assert "-dr" in calls[1] and "-cs" in calls[1]
+    # -dr/-disable-redirects is deliberately NOT passed: it disables following ANY
+    # redirect (in-scope or not), not just out-of-scope ones, which silently
+    # truncated every real crawl to one page -- see crawler.py's own comment.
+    # -cs (crawl-scope regex) is the actual, sufficient bound on where redirects
+    # (and every other discovered URL) may go; the Scope Guard re-checks on top.
+    assert "-dr" not in calls[1] and "-cs" in calls[1]
     assert [ep.url for ep in result.endpoints] == ["http://example.test/ok"]
 
 
