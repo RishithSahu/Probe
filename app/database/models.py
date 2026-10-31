@@ -131,6 +131,7 @@ class AgentTaskRecord(Base):
     execution_method: Mapped[str | None] = mapped_column(String(256), nullable=True)
     evidence_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     verification_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reservation_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     assessment: Mapped["AssessmentRecord"] = relationship(back_populates="tasks")
 

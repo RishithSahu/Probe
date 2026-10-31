@@ -16,6 +16,27 @@ from app.adapters.network_graph_adapter import JSONFileNetworkGraphSource, load_
 FIXTURE_GRAPH = Path(__file__).parent / "fixtures" / "network_graphs" / "sample_graph.json"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _fresh_local_test_database():
+    """app/database/session.py's engine binds to settings.database_url ONCE at import time, before any
+    test's own monkeypatch of settings.evidence_dir can take effect -- so every test that uses
+    session_scope()/init_db() actually shares this one real, gitignored evidence/ape.db file, not a fresh
+    per-test database. A schema migration added via Base.metadata.create_all's own ALTER-TABLE-on-missing-
+    column path (e.g. a new nullable column on an existing table) never retroactively applies to a file
+    that already has that table, so a stale local copy left over from a previous run can fail every test
+    with "table X has no column named Y" the moment a new migration lands -- this has happened three times
+    in this project's history already (see docs/PROGRESS.md entries 7, 9, 11). Deleting it once at the
+    start of the session (never mid-session, so nothing here races a running test) makes every run start
+    from the current schema, exactly like a CI runner with no prior state would."""
+    from app.core.config import settings
+    if settings.database_url.startswith("sqlite:///"):
+        db_path = Path(settings.database_url.removeprefix("sqlite:///"))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        db_path.unlink(missing_ok=True)
+    yield
+
+
 def start_probe_test_server(app) -> tuple:
     """Starts Probe's FastAPI `app` with uvicorn on a free port in a
     background thread, and returns (server, base_url) once it's actually

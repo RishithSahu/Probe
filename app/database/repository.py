@@ -6,6 +6,8 @@ via `app.database.session.session_scope`.
 """
 from __future__ import annotations
 
+import secrets
+
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -131,7 +133,7 @@ def upsert_agent_task(db: Session, task: AgentTask) -> None:
     db.flush()
 
 
-def try_reserve_task(db: Session, task: AgentTask) -> bool:
+def try_reserve_task(db: Session, task: AgentTask) -> str | None:
     """Atomically claim `task.task_id` for THIS caller, so a concurrent scheduler dispatching several
     candidates at once can never run the same one twice. `task.task_id` is a deterministic fingerprint of
     the unit of work (assessment + agent/surface + target/service -- see
@@ -149,19 +151,27 @@ def try_reserve_task(db: Session, task: AgentTask) -> bool:
          currently racing this same reservation): an UPDATE ... WHERE status != 'running', whose rowcount
          is checked exactly like Probe's Hub.lease() does -- it reclaims a terminal task for a new attempt,
          but a task some other caller already has RUNNING matches no row and rowcount is 0.
-    Returns True iff THIS call now owns the task (the caller must execute it); False means it is currently
-    running under somebody else's reservation (the caller must skip it, not retry)."""
+
+    Every successful claim mints a fresh `reservation_token` (returned to the caller, who must present it
+    back to `try_complete_task` -- see that function's docstring for why: `run_concurrently()`'s timeout
+    cannot actually kill a running thread, so an abandoned one finishing late must not be able to overwrite
+    whatever a retry, holding a NEWER token, already wrote for the same task_id).
+
+    Returns the new reservation_token iff THIS call now owns the task (the caller must execute it and later
+    present this token back); None means it is currently running under somebody else's reservation (the
+    caller must skip it, not retry)."""
+    token = secrets.token_hex(12)
     record = AgentTaskRecord(
         task_id=task.task_id, assessment_id=task.assessment_id, agent_id=task.agent_id.value,
         task_type=task.task_type, input_data=task.input_data, status=task.status.value,
         output_data=task.output_data, parent_task_id=task.parent_task_id, initiated_by=task.initiated_by,
         execution_method=task.execution_method, started_at=task.started_at,
-        verification_status=task.verification_status,
+        verification_status=task.verification_status, reservation_token=token,
     )
     db.add(record)
     try:
         db.flush()
-        return True
+        return token
     except IntegrityError:
         db.rollback()
         result = db.execute(
@@ -172,11 +182,30 @@ def try_reserve_task(db: Session, task: AgentTask) -> bool:
                 input_data=task.input_data, status=task.status.value, output_data=None, error_message=None,
                 started_at=task.started_at, completed_at=None, parent_task_id=task.parent_task_id,
                 initiated_by=task.initiated_by, execution_method=task.execution_method,
-                evidence_ids=None, verification_status=None,
+                evidence_ids=None, verification_status=None, reservation_token=token,
             )
         )
         db.flush()
-        return result.rowcount == 1
+        return token if result.rowcount == 1 else None
+
+
+def try_complete_task(db: Session, task_id: str, reservation_token: str, **fields) -> bool:
+    """Persist a reserved task's final state -- but ONLY if `reservation_token` still matches what is
+    currently on the row. This is the write-side half of the fencing `try_reserve_task` sets up (the same
+    pattern as Probe's Hub.submit()/fail() checking lease_token against _held_task): if a thread
+    run_concurrently() already gave up on and reported FAILED (because Python cannot force-kill a running
+    thread, only stop waiting on it) finishes LATER, and by then a retry has reserved the same task_id
+    under a NEW token, this call's UPDATE matches zero rows and returns False -- the stale result is
+    rejected instead of silently clobbering whatever the retry already wrote. `fields` are plain column
+    name/value pairs (already-serialised: enum .value, not the enum itself).
+    Returns True iff this write was accepted."""
+    result = db.execute(
+        update(AgentTaskRecord)
+        .where(AgentTaskRecord.task_id == task_id, AgentTaskRecord.reservation_token == reservation_token)
+        .values(**fields)
+    )
+    db.flush()
+    return result.rowcount == 1
 
 
 def list_agent_tasks(db: Session, assessment_id: str) -> list[AgentTaskRecord]:
