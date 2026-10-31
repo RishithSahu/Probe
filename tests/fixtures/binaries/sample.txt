@@ -1,0 +1,1 @@
+not a binary, used to test unrecognised-format handling

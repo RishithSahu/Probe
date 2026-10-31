@@ -1,0 +1,32 @@
+# Orchestrator + FastAPI API. Runs the LangGraph workflow, the external
+# Network Vulnerability Agent ingestion endpoint, and (when
+# APE_WEB_AGENT_SERVICE_URL / APE_BINARY_AGENT_SERVICE_URL are unset) the
+# Web/Binary agent code in-process. No pentest tooling (Katana/ZAP/Ghidra)
+# lives in this image — see Dockerfile.web / Dockerfile.binary for those.
+FROM python:3.12-slim
+
+WORKDIR /srv/app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# file/readelf/checksec are needed here too since, by default (no
+# APE_BINARY_AGENT_SERVICE_URL set), the Binary Analysis Agent's Stage A
+# metadata identification runs in THIS process.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends binutils file checksec \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY scripts ./scripts
+COPY docker/entrypoint-orchestrator.sh /usr/local/bin/entrypoint-orchestrator.sh
+RUN chmod +x /usr/local/bin/entrypoint-orchestrator.sh
+
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/entrypoint-orchestrator.sh"]

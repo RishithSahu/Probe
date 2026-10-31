@@ -1,0 +1,49 @@
+# Binary Analysis Agent service (optional — see APE_BINARY_AGENT_SERVICE_URL
+# in .env.example). Carries Ghidra Headless Analyzer + a JDK, plus
+# file/readelf/checksec, so these heavyweight tools aren't in the
+# orchestrator image. If the Ghidra download fails at build time (no network
+# access, or the pinned release moved), the agent still runs using its
+# documented synthetic-fixture fallback (APE_BINARY_AGENT_USE_FIXTURES=true)
+# instead of failing to start — set APE_GHIDRA_INSTALL_DIR to empty in that
+# case (the default) rather than a path that doesn't exist.
+FROM eclipse-temurin:17-jdk-jammy AS ghidra-fetch
+
+ARG GHIDRA_VERSION=11.1.2
+ARG GHIDRA_DATE=20240709
+ARG GHIDRA_RELEASE_TAG=Ghidra_11.1.2_build
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+    && curl -fsSL -o /tmp/ghidra.zip \
+         "https://github.com/NationalSecurityAgency/ghidra/releases/download/${GHIDRA_RELEASE_TAG}/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip" \
+    && mkdir -p /opt/ghidra-extracted \
+    && unzip -q /tmp/ghidra.zip -d /opt/ghidra-extracted \
+    && rm /tmp/ghidra.zip \
+    || mkdir -p /opt/ghidra-extracted  # build continues even if the download failed; see fixture-fallback note above
+
+FROM python:3.12-slim
+
+WORKDIR /srv/app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends binutils file checksec openjdk-17-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghidra-fetch /opt/ghidra-extracted /opt/ghidra-extracted
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+COPY app ./app
+COPY scripts ./scripts
+
+# APE_GHIDRA_INSTALL_DIR should point to the single directory the Ghidra zip
+# extracted into (ghidra_<version>_PUBLIC); left as a build-time ARG default
+# so docker-compose.yml's APE_GHIDRA_INSTALL_DIR env override still wins.
+ENV APE_GHIDRA_INSTALL_DIR=/opt/ghidra-extracted/ghidra_11.1.2_PUBLIC
+
+EXPOSE 8002
+CMD ["uvicorn", "app.agents.binary_analysis.service:app", "--host", "0.0.0.0", "--port", "8002"]

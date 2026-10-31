@@ -1,0 +1,39 @@
+{
+  "scope_id": "SCOPE-HACKATHON-01",
+  "generated_by": "network_probe",
+  "generated_at": "2026-10-30T12:00:00Z",
+  "hosts": [
+    {
+      "asset_id": "HOST-001",
+      "ip": "192.168.60.10",
+      "hostname": "web01.lab.local",
+      "asset_type": "host",
+      "services": [
+        {"service_id": "SVC-001", "port": 443, "protocol": "tcp", "service_name": "https", "version": "nginx/1.24.0"},
+        {"service_id": "SVC-002", "port": 22, "protocol": "tcp", "service_name": "ssh", "version": "OpenSSH 9.3"}
+      ]
+    },
+    {
+      "asset_id": "HOST-002",
+      "ip": "192.168.60.11",
+      "hostname": "api01.lab.local",
+      "asset_type": "host",
+      "services": [
+        {"service_id": "SVC-003", "port": 80, "protocol": "tcp", "service_name": "http", "version": "gunicorn"}
+      ]
+    },
+    {
+      "asset_id": "HOST-003",
+      "ip": "192.168.60.12",
+      "hostname": "db01.lab.local",
+      "asset_type": "host",
+      "services": [
+        {"service_id": "SVC-004", "port": 5432, "protocol": "tcp", "service_name": "postgresql", "version": "15.4"}
+      ]
+    }
+  ],
+  "edges": [
+    {"source": "HOST-001", "target": "HOST-002", "relation": "CONNECTS_TO"},
+    {"source": "HOST-002", "target": "HOST-003", "relation": "CONNECTS_TO"}
+  ]
+}

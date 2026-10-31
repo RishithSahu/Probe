@@ -1,0 +1,28 @@
+# Core
+fastapi==0.143.2
+uvicorn[standard]==0.54.0
+pydantic==2.12.5
+pydantic-settings==2.8.1
+langgraph==1.2.19
+
+# Database
+SQLAlchemy==2.0.29
+alembic==1.20.1
+psycopg2-binary==2.9.11
+
+# Web Security Agent
+httpx==0.28.1
+
+# Binary Analysis Agent
+pefile==2024.8.26
+
+# Analysis / reporting
+networkx==3.3
+Jinja2==3.1.3
+reportlab==5.1.0
+
+# Testing / quality (dev only — also installed in the orchestrator image so
+# `pytest`/`ruff` can be run inside the container if preferred over host)
+pytest==8.4.2
+pytest-cov==7.0.0
+ruff==0.17.1

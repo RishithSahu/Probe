@@ -1,0 +1,7 @@
+This report presents the results of an authorised security assessment (assessment ID {{ assessment_id }}, scope {{ scope_id }}) conducted against {{ asset_count }} network asset(s){% if binary_count %} and {{ binary_count }} supplied binary file(s){% endif %}.
+
+The assessment combined network-service findings from the Network Vulnerability Assessment Agent with web-application findings from the Web Security Assessment Agent and static binary findings from the Binary Analysis Agent, coordinated by a LangGraph-based Orchestrator. {{ confirmed_count }} finding(s) were confirmed and {{ suspected_count }} remain suspected pending further verification{% if rejected_count %}; {{ rejected_count }} were reviewed and rejected as false positives{% endif %}.
+
+Severity breakdown: {% for sev, count in severity_counts.items() %}{{ count }} {{ sev }}{% if not loop.last %}, {% endif %}{% endfor %}.
+
+{% if incomplete_tasks %}The following assessment activities did not complete and are reflected as limitations in this report: {{ incomplete_tasks | join(', ') }}.{% else %}All scheduled assessment activities completed.{% endif %}

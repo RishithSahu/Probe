@@ -1,0 +1,100 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ape
+      POSTGRES_PASSWORD: ape
+      POSTGRES_DB: ape
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ape"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    restart: unless-stopped
+    command: >
+      zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.disablekey=true
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+    ports:
+      - "8080:8080"
+
+  # --- Specialist agent services --------------------------------------------
+  # Optional: the orchestrator runs the Web/Binary agent code in-process by
+  # default (simpler for local dev — see app/core/config.py). Set
+  # APE_WEB_AGENT_SERVICE_URL / APE_BINARY_AGENT_SERVICE_URL on the
+  # orchestrator service (uncommented below) to dispatch to these instead,
+  # matching PRD Part 10's "FastAPI for service communication" model.
+  web-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    environment:
+      APE_ZAP_API_URL: http://zap:8080
+      APE_WEB_AGENT_USE_FIXTURES: "true"
+      APE_EVIDENCE_DIR: /data/evidence
+    volumes:
+      - ./evidence:/data/evidence
+    ports:
+      - "8001:8001"
+    depends_on:
+      - zap
+
+  binary-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.binary
+    restart: unless-stopped
+    environment:
+      APE_BINARY_AGENT_USE_FIXTURES: "true"
+      APE_EVIDENCE_DIR: /data/evidence
+    volumes:
+      - ./inputs/binaries:/data/inputs/binaries:ro
+      - ./evidence:/data/evidence
+    ports:
+      - "8002:8002"
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APE_DATABASE_URL: postgresql+psycopg2://ape:ape@postgres:5432/ape
+      APE_ZAP_API_URL: http://zap:8080
+      APE_EVIDENCE_DIR: /data/evidence
+      APE_INPUTS_DIR: /data/inputs
+      APE_NETWORK_GRAPH_DIR: /data/inputs/network_graphs
+      APE_BINARIES_DIR: /data/inputs/binaries
+      APE_REPORTS_DIR: /data/evidence/reports
+      # Uncomment to dispatch to the standalone agent services instead of
+      # running their code in-process:
+      # APE_WEB_AGENT_SERVICE_URL: http://web-agent:8001
+      # APE_BINARY_AGENT_SERVICE_URL: http://binary-agent:8002
+    volumes:
+      - ./inputs/network_graphs:/data/inputs/network_graphs:ro
+      - ./inputs/binaries:/data/inputs/binaries:ro
+      - ./evidence:/data/evidence
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      zap:
+        condition: service_started
+
+volumes:
+  postgres-data:
