@@ -121,6 +121,11 @@ def upsert_agent_task(db: Session, task: AgentTask) -> None:
     record.error_message = task.error_message
     record.started_at = task.started_at
     record.completed_at = task.completed_at
+    record.parent_task_id = task.parent_task_id
+    record.initiated_by = task.initiated_by
+    record.execution_method = task.execution_method
+    record.evidence_ids = task.evidence_ids
+    record.verification_status = task.verification_status
     db.flush()
 
 

@@ -126,6 +126,11 @@ class AgentTaskRecord(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parent_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    initiated_by: Mapped[str] = mapped_column(String(32), default="orchestrator")
+    execution_method: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    evidence_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    verification_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     assessment: Mapped["AssessmentRecord"] = relationship(back_populates="tasks")
 

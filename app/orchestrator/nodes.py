@@ -436,34 +436,21 @@ def ingest_network_agent_results(state: OrchestratorState) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def handle_discovered_binaries(state: OrchestratorState) -> dict:
-    """The Orchestrator's own job of noticing that a binary reference needs analysis and creating the task
-    for it, automatically -- the Web Agent only ever reports a reference (content_discovery.py); it is this
-    node that recognises that and hands it to the Binary Analysis Agent (acquisition.py +
-    discovered_artifact.py), via the same shared task ledger every other agent task uses."""
+def process_discovered_binary_references(
+    assessment_id: str, policy, graph, references: list[dict], *,
+    guard: ScopeGuard, output_dir: Path, parent_task_id: str | None = None,
+    initiated_by: str = "orchestrator", execution_method: str = "handle_discovered_binaries",
+) -> AgentResult:
+    """The ONE place a discovered binary reference becomes an acquire -> analyse -> (maybe) credential-access
+    pipeline run, via the shared task ledger -- called both from the `handle_discovered_binaries` LangGraph
+    node and from `app.orchestrator.autonomous_loop` (the Web Agent's web-to-binary handoff) so neither one
+    duplicates this logic."""
     from app.adapters.authorisation_grants import headers_for_url
     from app.agents.binary_analysis.acquisition import acquire_binary
     from app.agents.binary_analysis.discovered_artifact import analyse_discovered_binary
     from app.agents.binary_analysis.findings import findings_from_weaknesses
     from app.core.schemas import AgentTask
 
-    assessment_id = state["assessment_id"]
-    policy = state["policy"]
-    graph = state.get("network_graph")
-    web_result = state.get("web_agent_result")
-    references = list(web_result.discovered_binary_references) if web_result else []
-
-    if not references:
-        return {}
-    if not policy.allow_binary_analysis:
-        logger.info("handle_discovered_binaries: %d binary reference(s) reported but allow_binary_analysis is "
-                   "disabled; no task created", len(references))
-        return {"errors": state.get("errors", []) + [
-            f"handle_discovered_binaries: {len(references)} binary reference(s) reported by content discovery "
-            "but allow_binary_analysis is disabled -- no analysis attempted"]}
-
-    guard = ScopeGuard(policy, graph)
-    output_dir = Path(settings.evidence_dir) / assessment_id / "discovered_binaries"
     assets_by_id = {a.asset_id: a for a in graph.assets} if graph else {}
 
     all_findings: list[Finding] = []
@@ -483,6 +470,7 @@ def handle_discovered_binaries(state: OrchestratorState) -> dict:
                     task_type="binary_analysis_triggered_by_web_discovery", input_data=input_data, status=status,
                     error_message=error, started_at=_now() if started else None,
                     completed_at=_now() if status in (TaskStatus.COMPLETED, TaskStatus.FAILED) else None,
+                    parent_task_id=parent_task_id, initiated_by=initiated_by, execution_method=execution_method,
                 ))
 
         _task(TaskStatus.RUNNING, started=True)
@@ -514,6 +502,19 @@ def handle_discovered_binaries(state: OrchestratorState) -> dict:
             analysis.weaknesses, assessment_id=assessment_id, binary_id=binary_id,
             source_tool="binary_analysis_agent(discovered_artifact)",
         )
+        # Binary-to-network handoff: when a weakness's own corroborating terms (set generically from
+        # correlation_terms -- ports/service names/hostname already published about the service that led
+        # here, never anything challenge-specific) name a service on this SAME asset, link the finding to
+        # it. This is what makes the scheduler's evidence-backed prioritisation (app.orchestrator.scheduler)
+        # treat that service as a high-value follow-up automatically -- no second dispatch pipeline needed.
+        for weakness, finding in zip(analysis.weaknesses, findings):
+            terms = {str(t).lower() for t in (weakness.context.get("corroborating_terms") or [])}
+            if not terms or asset is None:
+                continue
+            for svc in asset.services:
+                if str(svc.port) in terms or (svc.service_name and svc.service_name.lower() in terms):
+                    finding.service_id = svc.service_id
+                    break
         all_findings.extend(findings)
         all_evidence.extend(evidence)
 
@@ -529,7 +530,8 @@ def handle_discovered_binaries(state: OrchestratorState) -> dict:
                     input_data={"credential_ref": rc["credential_ref"], "source_binary_sha256": acquired.sha256,
                                "source_url": url, "function_name": rc["function_name"],
                                "confidence": rc["confidence"]},
-                    status=TaskStatus.BLOCKED,
+                    status=TaskStatus.BLOCKED, parent_task_id=task_id, initiated_by=initiated_by,
+                    execution_method=execution_method,
                 ))
                 repository.log_event(
                     db, assessment_id, AgentId.BINARY_ANALYSIS.value,
@@ -543,10 +545,38 @@ def handle_discovered_binaries(state: OrchestratorState) -> dict:
         for record in guard.audit_log:
             repository.store_tool_invocation_log(db, assessment_id, "scope_guard", record)
 
-    result = AgentResult(
+    return AgentResult(
         agent_id=AgentId.BINARY_ANALYSIS, assessment_id=assessment_id,
         execution_status=TaskStatus.COMPLETED if (all_findings or not all_errors) else TaskStatus.FAILED,
         findings=all_findings, evidence=all_evidence, tool_executions=all_tool_executions, errors=all_errors,
+    )
+
+
+def handle_discovered_binaries(state: OrchestratorState) -> dict:
+    """The Orchestrator's own job of noticing that a binary reference needs analysis and creating the task
+    for it, automatically -- the Web Agent only ever reports a reference (content_discovery.py); it is this
+    node that recognises that and hands it to the Binary Analysis Agent via
+    `process_discovered_binary_references`, the same function the autonomous loop's web-to-binary handoff
+    calls, so the pipeline is defined in exactly one place."""
+    assessment_id = state["assessment_id"]
+    policy = state["policy"]
+    graph = state.get("network_graph")
+    web_result = state.get("web_agent_result")
+    references = list(web_result.discovered_binary_references) if web_result else []
+
+    if not references:
+        return {}
+    if not policy.allow_binary_analysis:
+        logger.info("handle_discovered_binaries: %d binary reference(s) reported but allow_binary_analysis is "
+                   "disabled; no task created", len(references))
+        return {"errors": state.get("errors", []) + [
+            f"handle_discovered_binaries: {len(references)} binary reference(s) reported by content discovery "
+            "but allow_binary_analysis is disabled -- no analysis attempted"]}
+
+    guard = ScopeGuard(policy, graph)
+    output_dir = Path(settings.evidence_dir) / assessment_id / "discovered_binaries"
+    result = process_discovered_binary_references(
+        assessment_id, policy, graph, references, guard=guard, output_dir=output_dir,
     )
     return {"triggered_binary_agent_result": result}
 

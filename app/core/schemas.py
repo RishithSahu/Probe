@@ -67,6 +67,11 @@ class TaskStatus(str, enum.Enum):
     # person's separate, explicit approval -- distinct from PENDING (which the orchestrator itself may pick
     # up and run). Nothing transitions a task OUT of this status automatically.
     BLOCKED = "blocked"
+    # Execution hit a real error in one stage (e.g. one crawl step timed out) but another stage still
+    # produced genuine, independently-evidenced findings -- distinct from FAILED (nothing useful came back)
+    # and from COMPLETED (no error at all). Findings from a PARTIAL task are stored and verified exactly
+    # like any other -- a stage error must never discard evidence another stage actually produced.
+    PARTIAL = "partial"
 
 
 class AssessmentStatus(str, enum.Enum):
@@ -340,6 +345,25 @@ class AgentTask(BaseModel):
     error_message: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+
+    # -- execution provenance: who/what produced this task, so an orchestrator-dispatched action is never
+    # indistinguishable from one a person (or Claude) performed by hand and recorded after the fact. --
+    parent_task_id: str | None = Field(
+        default=None, description="The task (e.g. a prior objective's) whose result justified creating this one."
+    )
+    initiated_by: str = Field(
+        default="orchestrator", description="'orchestrator' for autonomous dispatch; 'operator' for a "
+        "human-approved action (e.g. authorised_credential_access); never silently defaulted away from the truth."
+    )
+    execution_method: str | None = Field(
+        default=None, description="The concrete call path that ran this task, e.g. "
+        "'orchestrator.autonomous_loop.run_next_iteration -> run_web_security_agent'."
+    )
+    evidence_ids: list[str] = Field(default_factory=list)
+    verification_status: str | None = Field(
+        default=None, description="None until checked; then 'verified' or 'unverified' -- set by "
+        "app.analysis.evidence_validator, never by the agent that produced the finding."
+    )
 
 
 class AgentResult(BaseModel):

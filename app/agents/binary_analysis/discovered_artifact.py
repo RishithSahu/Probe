@@ -145,6 +145,7 @@ def _recover_credentials(
                                              if corroborating else
                                              "unconfirmed: nothing in this function's own code references the "
                                              "service that led here -- treat the association as unverified"),
+                     "corroborating_terms": corroborating,
                      "schedule": schedule.as_context()},
         ))
     return weaknesses, recovered, errors
@@ -200,6 +201,7 @@ def analyse_discovered_binary(
             continue
         if corroborating:
             w.context["service_correlation"] = f"corroborated: this binary's own content also references {corroborating}"
+            w.context["corroborating_terms"] = corroborating
             w.description += f" Corroborated by the binary's own reference to {corroborating}."
         else:
             w.context["service_correlation"] = (
