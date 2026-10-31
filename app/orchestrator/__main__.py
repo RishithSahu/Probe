@@ -26,7 +26,7 @@ from app.core.exceptions import AppError
 from app.core.schemas import Assessment, AssessmentPolicy, AssessmentStatus, NetworkGraph
 from app.database import repository
 from app.database.session import session_scope
-from app.orchestrator.autonomous_loop import run_next_iteration
+from app.orchestrator.autonomous_loop import run_concurrent_iteration, run_next_iteration
 
 logger = logging.getLogger("ape.orchestrator.cli")
 
@@ -105,7 +105,7 @@ def _load_or_create(
 
 
 def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: str | None = None, *,
-       probe_port: int = 8080, probe_minutes: float = 5.0) -> int:
+       probe_port: int = 8080, probe_minutes: float = 5.0, max_inflight: int = 1) -> int:
     policy = _load_or_create(assessment_id, scope, network_graph_path, probe_port=probe_port, probe_minutes=probe_minutes)
     output_dir = Path(settings.evidence_dir) / assessment_id / "autonomous"
     deadline = time.monotonic() + max_minutes * 60
@@ -125,30 +125,40 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
                 break
 
             iteration += 1
-            trace = run_next_iteration(assessment_id, policy=policy, output_dir=output_dir,
-                                       parent_task_id=parent_task_id)
+            # max_inflight=1 (the default) keeps the original one-candidate-per-iteration behaviour exactly;
+            # >1 dispatches up to that many independent, atomically-reserved candidates concurrently each
+            # iteration (app.orchestrator.autonomous_loop.run_concurrent_iteration -- item 4/5/6 of the
+            # concurrency spec), still one `while` tick per batch so the time-budget check above still applies.
+            traces = ([run_next_iteration(assessment_id, policy=policy, output_dir=output_dir, parent_task_id=parent_task_id)]
+                     if max_inflight <= 1 else
+                     run_concurrent_iteration(assessment_id, policy=policy, output_dir=output_dir,
+                                              parent_task_id=parent_task_id, max_inflight=max_inflight))
 
-            if trace.objective is None:
+            if all(trace.objective is None for trace in traces):
                 # A real distinction (point E): "nothing is eligible right now" is not automatically the
                 # same as "the assessment is done" -- but with no agent-capability signal to tell them
                 # apart beyond the scheduler's own reason text, this is reported honestly as incomplete,
                 # not silently marked complete.
-                logger.info("iteration %d: no justified next action -- %s", iteration, trace.blocked_reason)
+                logger.info("iteration %d: no justified next action -- %s", iteration, traces[0].blocked_reason)
                 final_status = AssessmentStatus.FAILED  # "blocked", in this schema's vocabulary
                 break
 
-            logger.info(
-                "iteration %d: task=%s agent=%s score=%.2f findings=%d (+%d via binary handoff) "
-                "verification=%s parent=%s",
-                iteration, trace.task_id, trace.agent_id.value if trace.agent_id else None,
-                trace.selection_explanation.get("selected", {}).get("total_score", 0.0),
-                trace.findings_count, trace.binary_findings_count,
-                None, parent_task_id,
-            )
-            # Each iteration becomes the parent of the next -- a plain, honest provenance chain of "the
-            # loop kept going from here", not a claim about which specific finding justified it (the
-            # scheduler's persisted explanation on each task already says that precisely).
-            parent_task_id = trace.task_id
+            for trace in traces:
+                if trace.objective is None:
+                    continue
+                logger.info(
+                    "iteration %d: task=%s agent=%s score=%.2f findings=%d (+%d via binary handoff) "
+                    "verification=%s parent=%s",
+                    iteration, trace.task_id, trace.agent_id.value if trace.agent_id else None,
+                    trace.selection_explanation.get("selected", {}).get("total_score", 0.0),
+                    trace.findings_count, trace.binary_findings_count,
+                    None, parent_task_id,
+                )
+            # Each batch becomes the parent of the next -- a plain, honest provenance chain of "the loop
+            # kept going from here", not a claim about which specific finding justified it (the scheduler's
+            # persisted explanation on each task already says that precisely). With several traces in one
+            # batch, the first one with a real task_id anchors the next batch's parent link.
+            parent_task_id = next((t.task_id for t in traces if t.task_id), parent_task_id)
     except KeyboardInterrupt:
         logger.info("interrupted by user after %d iteration(s) -- state is persisted; re-run the same "
                    "command with the same --assessment-id to resume", iteration)
@@ -180,13 +190,18 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--probe-port", type=int, default=8080)
     run_parser.add_argument("--probe-minutes", type=float, default=5.0,
                             help="wall-clock budget for Probe's own discovery pass, when it is started by this command")
+    run_parser.add_argument("--max-inflight", type=int, default=1,
+                            help="how many independent, eligible candidates to dispatch concurrently per "
+                                 "iteration (default 1: the original one-at-a-time behaviour). >1 uses "
+                                 "app.orchestrator.autonomous_loop.run_concurrent_iteration, still subject "
+                                 "to the per-surface caps in app.core.config (max_concurrent_web_tasks etc.)")
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.command == "run":
         return run(args.assessment_id, args.scope, args.max_minutes, args.network_graph,
-                  probe_port=args.probe_port, probe_minutes=args.probe_minutes)
+                  probe_port=args.probe_port, probe_minutes=args.probe_minutes, max_inflight=args.max_inflight)
     parser.error(f"unknown command {args.command!r}")
     return 2
 
