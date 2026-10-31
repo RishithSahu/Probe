@@ -48,11 +48,16 @@ UNRESOLVED and is shown as unconfirmed, never as a network.
         VM / container host). L3 and L5 are then NOT allowed to call the host on-link (their assumption "no
         unknown proxy" is refuted); it becomes SUSPECTED_SEPARATE and is queued for the pivot sweep and the
         service/banner enrichment, which can confirm or refute it.
+    R8  a host's OWN stack (ping, closed-port RST) answers with TTL T, but a specific open port answers with TTL T-1
+                                                               => that service is served one forwarding hop behind the
+        host (DNAT / port-forward to a container or VM): a system and network the scan cannot address directly.
+        Needs no banner and no extra probing; suspected, never proof.
     R6  an in-scope host H answered a TTL=1 packet that was NOT for it with ICMP time-exceeded
                                                                => H forwards IP packets: a pivot candidate
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 
 from ..discovery.ingest import Evidence
@@ -82,6 +87,8 @@ class HostClass:
     visible_to: list[str] = field(default_factory=list)
     roles: list[str] = field(default_factory=list)          # e.g. "forwarder"
     forwarding_anomaly: bool = False                         # R4
+    behind_ports: dict[int, str] = field(default_factory=dict)   # R8: port -> evidence
+    behind_status: dict[int, str] = field(default_factory=dict)  # R8: port -> suspected | confirmed (forwarded service)
 
     @property
     def separate(self) -> bool:
@@ -116,7 +123,59 @@ def _one(ip: str, ev: Evidence, router_macs: set[str], gateway_ip: str | None,
         c.roles.append("catch-all-responder")
         c.support.append("it answers ICMP for EVERY address, including addresses that belong to other devices "
                          "(decoy / tarpit / AnyIP gateway): its answers say nothing about any single address")
-    ttls = ev.ttls.get(ip)
+    # R8 passive baseline: the host's own TCP stack (RST to a closed port / unsolicited ACK), same protocol as the
+    # SYN-ACK it is compared with (stacks may use a different initial TTL for ICMP than for TCP). Supporting only.
+    own = Counter()
+    for fam in ("tcp-rst", "tcp-ack"):
+        own.update(ev.ttl_kind.get(ip, {}).get(fam, {}))
+    own_ttl = None
+    if sum(own.values()) >= 2:
+        candidate, own_n = own.most_common(1)[0]
+        if candidate in (32, 64, 128, 255) and own_n >= 0.8 * sum(own.values()):
+            own_ttl = candidate
+
+    # R8 active verification: a TTL=1 SYN to a port is decisive by itself (TTL expiry is a property of the IP layer,
+    # independent of any passive baseline), so it is sent to every open TCP port regardless of whether a passive
+    # differential was ever noticed (Engine._t_fwdsvc) -- a thin or absent passive baseline can no longer hide a
+    # forwarded service. Four states, told apart explicitly:
+    #   confirmed            >=2 TTL=1 SYNs answered by the host's own MAC with time-exceeded: it forwards this port
+    #   verified-local        >=2 TTL=1 SYNs answered directly (local delivery ignores TTL): settled, not a question
+    #   ambiguous-incomplete   some active replies, too few/mixed to call either way, or only a passive differential
+    #                          with the active check not yet run: still open
+    #   (absent)               nothing anomalous observed for this port
+    active_ports = ({p for (h, p) in ev.ttl1_synack if h == ip} | {p for (h, p) in ev.ttl1_exceeded if h == ip}
+                    | set(ev.ttl_port.get(ip, {})))
+    for port in sorted(active_ports):
+        synack, exceeded_n = ev.ttl1_synack.get((ip, port), 0), ev.ttl1_exceeded.get((ip, port), 0)
+        cnt = ev.ttl_port.get(ip, {}).get(port)
+        passive_diff = bool(cnt and own_ttl and sum(cnt.values()) >= 2 and set(cnt) == {own_ttl - 1})
+        base_msg = (f"port {port} answers with TTL {(own_ttl - 1) if own_ttl else '?'} while this host's own TCP "
+                    f"stack answers with TTL {own_ttl}") if own_ttl else f"port {port}"
+        if exceeded_n >= 2:
+            c.behind_ports[port] = (f"{base_msg}: a TTL=1 SYN to that port is answered by the host's own MAC with "
+                                    f"time-exceeded ({exceeded_n}x) instead of being served -- the host FORWARDS this "
+                                    "port to a device behind it")
+            c.behind_status[port] = "confirmed"
+        elif synack >= 2:
+            if passive_diff:
+                c.support.append(f"R8 refuted for port {port}: {base_msg}, but a TTL=1 SYN to that port is answered "
+                                 f"by the host itself ({synack}x): the service is terminated locally")
+            c.behind_status[port] = "verified-local"
+        elif synack or exceeded_n:            # the active check ran but gave too few/mixed replies to call
+            c.behind_status[port] = "ambiguous-incomplete"
+            if passive_diff:
+                c.behind_ports[port] = f"{base_msg}: TTL=1 verification attempted but inconclusive (too few replies)"
+        elif passive_diff:                    # passive signal only; the active check has not run on this port yet
+            c.behind_ports[port] = f"{base_msg}: consistent with a forwarded service (not yet verified with TTL=1)"
+            c.behind_status[port] = "suspected"
+    if c.behind_ports:
+        c.roles.append("publishes-forwarded-service" if "confirmed" in c.behind_status.values() else "serves-ports-from-behind")
+        c.support.append("R8: " + "; ".join(sorted(c.behind_ports.values()))[:400])
+    non_service = Counter()                     # SYN-ACK TTLs describe a service, not the stack: leave them out of R4
+    for kind, cnt in ev.ttl_kind.get(ip, {}).items():
+        if kind != "tcp-syn":
+            non_service.update(cnt)
+    ttls = non_service or ev.ttls.get(ip)
     dec = bool(ttls) and sum(ttls.values()) >= 2 and all(t in DECREMENTED for t in ttls)
     c.forwarding_anomaly = dec
     if ip in ev.forwarders:

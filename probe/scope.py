@@ -67,8 +67,22 @@ class ScopeGuard:
         self.stray_hook = None  # callable(ip, caller) -- the kill switch plugs in here
         self._ranges: list[tuple[int, int]] = []
         self._held_ranges: list[tuple[int, int]] = []
+        self._frozen = False
         self.reload_approvals()
         self._rebuild()
+        self.freeze()
+
+    # ---- immutability ------------------------------------------------
+    def freeze(self) -> None:
+        """From here on the authorised scope cannot change for the life of this object. The operator's explicit scope
+        (CLI/config) is the whole egress boundary; hold approvals cannot expand it; nothing the
+        engine discovers -- a segment, a host, an advertised route -- can add to it. A new range needs a new
+        process started by a human with a new scope."""
+        self._frozen = True
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
 
     # ---- scope -------------------------------------------------------
     @property
@@ -158,21 +172,23 @@ class ScopeGuard:
 
     def reload_approvals(self) -> None:
         """Approvals are the network owner's one-time permission: an approved CIDR is
-        added to the scope and is never held. Written by `probe approve`."""
+        released from holds only if already inside the configured scope. Written by `probe approve`."""
+        if self._frozen:
+            raise ScopeViolation("the authorised scope is immutable once the probe has started; "
+                                 "restart with an explicit scope to authorise another range")
         if not self._approvals_path or not Path(self._approvals_path).exists():
             return
         try:
             data = json.loads(Path(self._approvals_path).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            logger.exception("could not read approvals file")
-            return
+        except (OSError, ValueError) as exc:
+            raise ScopeViolation("cannot verify approvals file") from exc
         with self._lock:
             for entry in data.get("approved", []):
                 net = ipaddress.ip_network(entry["cidr"], strict=False)
                 if net not in self._approved:
                     self._approved.append(net)
                 if not any(net.subnet_of(n) for n in self._networks if n.version == net.version):
-                    self._networks.append(net)
+                    raise ScopeViolation(f"approval {net} cannot expand the explicitly configured scope")
                 self._held.pop(net, None)
         self._rebuild()
 

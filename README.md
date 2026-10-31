@@ -130,6 +130,21 @@ cp probe-scope.example.txt probe-scope.txt   # edit to your authorised range(s)
 python -m probe
 ```
 
+**Live discovery additionally requires `authorisations.json`** with explicit
+discovery/inventory grants matching the configured scope — a discovered
+address, service reference, or interface supernet cannot extend that scope.
+`probe approve` releases holds only within that explicit scope. On Windows,
+a live run also requires independently verified Nmap program firewall rules:
+Probe writes an exact policy to its data directory and refuses to send any
+traffic if those rules are missing — install them (administrator rights
+required) with
+`enforce/windows-program-scope.ps1 -PolicyFile <data-directory>/egress-policy.json -Install`,
+then rerun. Other platforms currently refuse live execution until an
+independent enforcement adapter is provided. Use `--data-dir <directory>` to
+isolate reports/audit records per run. See
+[the Network Roamer review](docs/reviews/2026-10-31-roamer.md) for the
+current validation status of this enforcement.
+
 Point the orchestrator at it with `APE_PROBE_API_URL`. If the orchestrator
 runs in Docker, `127.0.0.1` inside the container is the container itself,
 not the host — use `http://host.docker.internal:8080` (Docker Desktop on

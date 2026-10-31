@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "grants": [
+    {
+      "cidr": "192.168.60.0/24",
+      "purposes": ["discovery", "inventory"],
+      "authority": "organisers, relayed by the operator in this chat on 2026-10-31",
+      "reference": "Phase 2: The original authorised range is 192.168.60.0/24",
+      "prefix_evidence": "operator-specified original authorised range; this is an authorisation boundary, not a claim about the physical subnet"
+    }
+  ],
+  "leads": [
+    {
+      "address": "192.168.60.139",
+      "source": "operator, 2026-10-31",
+      "claim": "challenge entry point; backend prefix not established"
+    }
+  ],
+  "pending": [
+    {
+      "claim": "additional hidden challenge network authorised for discovery and inventory",
+      "cidr": null,
+      "state": "exact backend prefix and matching range-specific grant required before investigation"
+    }
+  ]
+}

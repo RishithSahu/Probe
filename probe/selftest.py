@@ -33,7 +33,8 @@ class _NoNic(GuardedTransport):
 def run(scope_cidrs: list[str]) -> list[str]:
     """Returns a list of failures (empty = guard is sound)."""
     scope = ScopeGuard(scope_cidrs)
-    nets = [n for n in scope.networks if n.version == 4]
+    # adjacent ranges merge into one authorised block: the canaries must sit just outside the MERGED edges, not inside it
+    nets = list(ipaddress.collapse_addresses(n for n in scope.networks if n.version == 4))
     if not nets:
         return ["scope contains no IPv4 network: nothing can be probed safely"]
     me = str(nets[0].network_address + (len(list(nets[0].hosts())) // 2 or 1))
@@ -47,9 +48,17 @@ def run(scope_cidrs: list[str]) -> list[str]:
         return Ether(src=FAKE_MAC, dst=kw.pop("mac", GW_MAC)) / IP(src=me, dst=dst, id=kw.pop("id", PROBE_ID), **kw) / ICMP(type=8)
 
     canaries: dict[str, object] = {}
-    for n in nets:  # the addresses immediately around every authorised range
-        canaries[f"just below {n}"] = echo(str(n.network_address - 1))
-        canaries[f"just above {n}"] = echo(str(n.broadcast_address + 1))
+    runs: list[list[int]] = []                 # contiguous authorised address runs (adjacent blocks form one run)
+    for n in sorted(nets, key=lambda x: int(x.network_address)):
+        lo, hi = int(n.network_address), int(n.broadcast_address)
+        if runs and lo == runs[-1][1] + 1:
+            runs[-1][1] = hi
+        else:
+            runs.append([lo, hi])
+    for lo, hi in runs:  # the addresses immediately around every authorised run
+        a, b = ipaddress.ip_address(lo), ipaddress.ip_address(hi)
+        canaries[f"just below {a}"] = echo(str(ipaddress.ip_address(lo - 1)))
+        canaries[f"just above {b}"] = echo(str(ipaddress.ip_address(hi + 1)))
     canaries.update({
         "RFC1918 elsewhere": echo("10.0.0.1"), "public": echo("8.8.8.8"), "loopback": echo("127.0.0.1"),
         "limited broadcast": echo("255.255.255.255"), "multicast mDNS": echo("224.0.0.251"),
@@ -67,7 +76,7 @@ def run(scope_cidrs: list[str]) -> list[str]:
         "UDP DNS-style to other port": Ether(src=FAKE_MAC, dst=GW_MAC) / IP(src=me, dst=inside, id=PROBE_ID) / UDP(dport=5353),
         "GRE": Ether(src=FAKE_MAC, dst=GW_MAC) / IP(src=me, dst=inside, id=PROBE_ID, proto=47),
         "IPv6": Ether(src=FAKE_MAC, dst="33:33:00:00:00:01") / IPv6(src="fe80::1", dst="ff02::1") / ICMP(),
-        "ARP outside": P.arp_who_has(me, FAKE_MAC, str(nets[0].broadcast_address + 1)),
+        "ARP outside": P.arp_who_has(me, FAKE_MAC, str(ipaddress.ip_address(runs[0][1] + 1))),
         "ARP reply (not who-has)": Ether(src=FAKE_MAC, dst="ff:ff:ff:ff:ff:ff") / ARP(op=2, hwsrc=FAKE_MAC, psrc=me, pdst=inside, hwdst=P.ARP_MARK),
         "ARP spoofing another host's IP": Ether(src=FAKE_MAC, dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, hwsrc=FAKE_MAC, psrc=inside, pdst=inside, hwdst=P.ARP_MARK),
         "gratuitous/announce ARP": Ether(src=FAKE_MAC, dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, hwsrc=FAKE_MAC, psrc=me, pdst=me, hwdst=P.ARP_MARK),

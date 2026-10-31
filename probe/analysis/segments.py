@@ -49,7 +49,7 @@ class Segment:
     covering: str = ""
     max_extent: str = ""
     basis: str = "members"
-    prefix_known: bool = True
+    prefix_known: bool = False
     hidden: dict = field(default_factory=dict)
     evidence: list[str] = field(default_factory=list)
 
@@ -170,7 +170,7 @@ def infer(classes: dict[str, HostClass], ev: Evidence, scope_nets, *, gateway_ip
             seg = Segment(
                 cidr=str(exact or cover), kind="in-scope", verdict="CONFIRMED", local=label == LOCAL,
                 members=members, covering=str(exact or cover), max_extent=str(exact or upper), basis=basis,
-                evidence=_summarise(cls))
+                prefix_known=exact is not None, evidence=_summarise(cls))
             if label != LOCAL:
                 d = {c.distance for c in cls if c.distance}
                 seg.distance = min(d) if d else None

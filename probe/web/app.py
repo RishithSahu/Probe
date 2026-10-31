@@ -33,15 +33,29 @@ class CompleteBody(BaseModel):
     ok: bool = True
 
 
+class LeaseBody(BaseModel):
+    kind: str = Field(..., description="specialist kind: web, ssh, database, file-share, directory-and-name, remote-access, "
+                                       "service-generic, network-structure")
+    agent: str
+    ttl_s: float = 120
+
+
+class ApproveBody(BaseModel):
+    key: str
+    approved_by: str
+
+
 class ScanBody(BaseModel):
     max_age_s: float = Field(300, description="reuse the last scan if it finished less than this many seconds ago")
     force: bool = False
 
 
 def create_app(store: Store, scope: ScopeGuard | None = None,
-               request_scan: Callable[[bool, float], dict] | None = None) -> FastAPI:
+               request_scan: Callable[[bool, float], dict] | None = None, orchestrator=None) -> FastAPI:
     app = FastAPI(title="Probe", docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
     svc = ProbeService(store, scope)
+    from ..orchestrator import Orchestrator
+    orch = orchestrator or (Orchestrator(store, scope) if scope is not None else None)
 
     @app.get("/")
     def index():
@@ -64,6 +78,9 @@ def create_app(store: Store, scope: ScopeGuard | None = None,
 
     @app.get("/api/hosts/{ip}")
     def host(ip: str):
+        from ..netutil import norm_ip
+        if norm_ip(ip) is None:
+            raise HTTPException(400, "not an IP address")
         h = svc.host(ip)
         if h is None:
             raise HTTPException(404, "unknown host")
@@ -89,6 +106,16 @@ def create_app(store: Store, scope: ScopeGuard | None = None,
     def leads():
         return svc.leads()
 
+    @app.get("/api/report")
+    def report():
+        """The final evidence-backed inventory/topology report (devices, segments, limits of visibility)."""
+        return store.meta().get("report") or {"state": "no completed scan yet"}
+
+    @app.get("/api/decisions")
+    def decisions():
+        """Why the probe ran (or skipped) each technique, with the information each one gained."""
+        return store.meta().get("decisions") or []
+
     @app.get("/api/events")
     def events(since: int = Query(0, ge=0), limit: int = Query(500, le=2000)):
         return svc.events(since, limit)
@@ -96,6 +123,32 @@ def create_app(store: Store, scope: ScopeGuard | None = None,
     @app.get("/api/scope/check")
     def scope_check(ip: str):
         return svc.check_scope(ip)
+
+    # ---- the orchestrator: tasks for specialist agents, derived from the probe's findings ----
+    @app.get("/api/orchestrator")
+    def orch_status():
+        if orch is None:
+            raise HTTPException(503, "no scope configured")
+        orch.consume()
+        return orch.status()
+
+    @app.post("/api/tasks/lease")
+    def task_lease(body: LeaseBody):
+        orch.consume()
+        t = orch.lease(body.kind, body.agent, body.ttl_s)
+        return {"task": t}
+
+    @app.post("/api/tasks/complete")
+    def task_complete(body: CompleteBody):
+        r = orch.complete(body.key, body.agent, body.result, body.ok)
+        if not r.get("ok"):
+            raise HTTPException(409, r.get("error", "not leased to this agent"))
+        return r
+
+    @app.post("/api/tasks/approve")
+    def task_approve(body: ApproveBody):
+        """A person releases a blocked task (e.g. examining a challenge artifact). Never called by an agent."""
+        return orch.approve(body.key, body.approved_by)
 
     # ---- the work ledger ----
     @app.get("/api/claims")

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 
+from . import netutil
 from .scope import ScopeGuard
 from .store import Store
 
@@ -41,7 +42,11 @@ class ProbeService:
         return out
 
     def host(self, ip: str) -> dict | None:
-        return next((h for h in self.store.hosts() if h["ip"] == ip), None)
+        target = netutil.norm_ip(ip)
+        h = next((h for h in self.store.hosts() if netutil.norm_ip(h["ip"]) == target), None) if target else None
+        if h is not None:
+            h = {**h, "leads": self.store.leads_for_ip(target)}         # exact address join, never a prefix match
+        return h
 
     def services(self, *, port: int | None = None, service: str | None = None, include_held: bool = False) -> list[dict]:
         out = []
@@ -51,8 +56,8 @@ class ProbeService:
             for p in h["open_ports"]:
                 if port is not None and p["port"] != port:
                     continue
-                if service and service not in (p["service"] or ""):
-                    continue
+                if service and (p["service"] or "").rstrip("?").lower() != service.rstrip("?").lower():
+                    continue                                              # exact service name: 'http' is not 'https'/'http-proxy'
                 out.append({"ip": h["ip"], "mac": h["mac"], "os_guess": h["os_guess"], **p})
         return out
 

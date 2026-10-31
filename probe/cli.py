@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import json
 import os
 import subprocess
 import sys
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from . import selftest
 from .killswitch import KillSwitch, TripwireLatched
-from .scope import ScopeGuard
+from .scope import ScopeGuard, ScopeViolation
 from .territory import Territory, TerritoryError, require_in_territory, sane_scope
 
 DATA = Path("probe-data")
@@ -94,7 +95,12 @@ def _plan(args) -> int:
     from .discovery import tiers
     scope = ScopeGuard(resolve_scope(args))
     n = sum(len(list(net.hosts())) for net in scope.networks if net.version == 4)
-    ports = tiers.top_tcp_ports(args.ports)
+    from . import planner as _pl
+    ports = tiers.top_tcp_ports(args.ports or _pl.derive_tuning(
+        _pl.Environment([], n, None, None, None, False), budget_s=None, tcp_ports=None, rate_pps=None)["tcp_ports"])
+    tune = _pl.derive_tuning(_pl.Environment([], n, None, None, None, False), budget_s=args.budget, tcp_ports=args.ports,
+                             rate_pps=args.rate)
+    args.rate, args.budget = tune["rate_pps"], tune["budget_s"]
     per_host = 11 + 3 + max(0, len(ports) - 8)          # cheap suite + tier3/4 + remaining ports
     total = n * (per_host + 2) + n * 3 * 4 + n            # + ARP/retransmit, + pivot/forwarder allowance
     print(f"scope: {[str(x) for x in scope.networks]}  ({n} addresses)")
@@ -130,7 +136,7 @@ def _print_result(store, transport, scope, attestation=None, engine=None) -> Non
         fronts = [h for h in hosts if "fronts-hidden-network" in h["roles"]]
         for f in fronts:
             print(f"  front device {f['ip']} (MAC {f['mac']}, reply TTL {f['ttl']}, open ports {[p['port'] for p in f['open_ports']] or 'none'})")
-        print("  These addresses are HELD: no further probing until the network owner approves (python -m probe approve <cidr>).")
+        print("  These addresses are HELD: the scope is immutable during a run; investigating them needs a new run whose scope a person has written to include them.")
     else:
         print("HIDDEN HOSTS FOUND: none in this pass")
     linknets = [x for x in store.segments() if x["kind"] == "outside-scope" and x["extra"].get("basis", "").startswith("the scanner's own")]
@@ -164,6 +170,29 @@ def _print_result(store, transport, scope, attestation=None, engine=None) -> Non
     outside = [l for l in store.leads() if l["source"] == "outside-scope-address"]
     for l in outside:
         print(f"OUTSIDE-SCOPE ADDRESS (recorded, never probed): {l['address']} -- {l['evidence'][:160]}")
+    rep = getattr(engine, "report", None) if engine else None
+    if rep:
+        sm = rep["summary"]
+        print()
+        print("AUTONOMOUS DISCOVERY: " + ("converged" if sm["converged"] else "stopped on the time budget (not converged)")
+              + f" after {engine.followup_rounds} follow-up round(s); {sm['addresses_answering']} addresses = {sm['devices']} devices "
+              f"({sm['duplicate_addresses_merged']} duplicate(s) merged, {sm['conflicts']} conflict(s))")
+        print("  settings derived from the environment: " + rep["derived_settings"]["basis"])
+        print("  techniques run: " + ", ".join(f"{k}x{v}" for k, v in sorted(engine.planner.runs.items())))
+        skipped = sorted({d["technique"] + " (" + d["reason"][:60] + ")" for d in rep["decision_journal"] if d["action"] == "skip"})
+        if skipped:
+            print("  techniques not used: " + "; ".join(skipped[:6]))
+        print("  limits of visibility:")
+        for lm in rep["limits_of_visibility"]["limits"][:8]:
+            print(f"    - [{lm['kind']}] {lm['what'][:150]}")
+        print(f"  authorised scope frozen: {rep['scope_immutable']}")
+        comp = rep.get("completeness")
+        if comp:
+            print(f"  DISCOVERY COMPLETENESS: {comp['status']} ({comp['stop_reason']}) -- {comp['rounds_used']}/"
+                  f"{comp['max_rounds']} round(s), {comp['elapsed_s']:.0f}/{comp['max_budget_s']:.0f}s of the "
+                  f"completeness budget, {comp['items_resolved']} item(s) resolved, {len(comp['items_unresolved'])} unresolved")
+            for it in comp["items_unresolved"][:8]:
+                print(f"    - [{it['kind']}] {it['key']}: {it['detail'][:140]}")
     if tm:
         print("timings: " + ", ".join(f"{k} {v}s" for k, v in tm.items()))
     for n in (engine.notes if engine else st.get("notes", [])):
@@ -176,6 +205,7 @@ def _print_result(store, transport, scope, attestation=None, engine=None) -> Non
 
 
 def _run(args) -> int:
+    startup_t0 = time.monotonic()
     scope_cidrs = resolve_scope(args)
     problems = sane_scope(scope_cidrs, allow_wide=args.allow_wide)
     if problems:                                  # a wrong range kills the agent before it does anything
@@ -186,8 +216,40 @@ def _run(args) -> int:
     from .engine import Engine
     from .net.transport import GuardedTransport
     from .store import Store
+    from . import authorisation, egress
+    from .tools import nmap_tool
+    import uuid
 
     DATA.mkdir(exist_ok=True)
+    def refuse_start(code, phase, reason):
+        result = {"status": "refused-before-network", "phase": phase, "reason": reason,
+                  "exit_code": code, "effective_scope": scope_cidrs, "probes_sent": 0,
+                  "seconds": round(time.monotonic()-startup_t0, 3)}
+        (DATA / "startup-result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return code
+    try:
+        scope = ScopeGuard(scope_cidrs, log_path=DATA / "stray-probes.log", approvals_path=DATA / "approvals.json")
+        scope_cidrs = [str(n) for n in scope.networks]
+        grant = authorisation.verify(Path(args.authorisations), scope_cidrs)
+    except (OSError, ValueError, ScopeViolation) as exc:
+        print(f"AUTHORISATION NOT VERIFIED: {exc}; no packets sent", file=sys.stderr)
+        return 8
+    (DATA / "authorisation-snapshot.json").write_text(json.dumps(grant, indent=2), encoding="utf-8")
+    if args.no_auditor or args.no_killswitch:
+        print("Independent auditor and kill switch are required for live discovery; no packets sent", file=sys.stderr)
+        return 8
+    nmap = nmap_tool.find_nmap()
+    if not nmap:
+        print("Cannot verify helper egress: nmap not installed; no packets sent", file=sys.stderr)
+        return 9
+    policy_path = DATA / "egress-policy.json"
+    egress.create_policy(policy_path, nmap, scope_cidrs)
+    ok, why = egress.check(policy_path)
+    if not ok:
+        print(f"INDEPENDENT EGRESS NOT VERIFIED: {why}; no packets sent. "
+              f"Install and verify the program rules with enforce/windows-program-scope.ps1 "
+              f"-PolicyFile {policy_path} -Install", file=sys.stderr)
+        return refuse_start(9, "independent-egress", why)
     kill = KillSwitch(DATA / "TRIPWIRE.json", enabled=not args.no_killswitch)
     try:
         kill.check_latch()
@@ -200,9 +262,9 @@ def _run(args) -> int:
         return 4
     print("scope guard self-test passed")
 
-    scope = ScopeGuard(scope_cidrs, log_path=DATA / "stray-probes.log", approvals_path=DATA / "approvals.json")
     store = Store(DATA / "probe.db")
-    transport = GuardedTransport(scope, iface=args.iface, rate_pps=args.rate, kill=kill)
+    store.set_meta("authorisation", grant)
+    transport = GuardedTransport(scope, iface=args.iface, rate_pps=args.rate or 2500, kill=kill)
     try:
         transport.prepare()                       # picks the NIC (uses helper programs); nothing sent yet
         require_in_territory(scope, transport.my_ip)
@@ -216,15 +278,19 @@ def _run(args) -> int:
         return 6
     print(f"territory lock: {transport.my_ip} is inside the permitted range and on the interface; "
           "the agent dies if that ever stops being true")
-    _ensure_privileges()                          # only now: a wrong range dies before even asking for admin rights
+    # Npcap installations can grant capture/injection access to a normal token. The capture auditor
+    # and transport must successfully open their handles; never launch a detached, unaudited copy.
 
     attestation, aud = None, None
     if not args.no_auditor:
-        attestation = Attestation(DATA)
+        run_id = uuid.uuid4().hex
+        attestation = Attestation(DATA, scope_digest=grant["scope_digest"], run_id=run_id)
         aud = subprocess.Popen([sys.executable, "-m", "probe.audit", "--iface", str(transport.iface),
                                 "--mac", transport.my_mac, "--scope", *scope_cidrs, "--state", str(DATA),
                                 "--pid", str(os.getpid()), "--ip", transport.my_ip,
-                                "--ifindex", str(transport.if_index or 0), "--iface-name", str(transport.iface)])
+                                "--ifindex", str(transport.if_index or 0), "--iface-name", str(transport.iface),
+                                "--run-id", run_id, "--egress-policy", str(policy_path.resolve())],
+                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         deadline = time.time() + 20
         while time.time() < deadline and not attestation.check()[0]:
             time.sleep(0.3)
@@ -234,11 +300,28 @@ def _run(args) -> int:
             aud.terminate()
             return 5
         transport.attest = attestation.check
+        nmap_tool.configure_egress(attestation.check)
         print("independent egress auditor attached (all probing stops if it ever stops attesting)")
 
     fence.install(kill)                           # from here on: no other network, DNS or subprocess is possible
     print("process fence installed (loopback only, no DNS, no raw send except through the guard; "
           "only nmap may be launched, only for validated in-scope targets)")
+
+    from .orchestrator import Orchestrator
+    orch = Orchestrator(store, scope)
+
+    def orchestrate():                            # consumes the change feed as it is written: nothing is missed
+        n = 0
+        while True:
+            try:
+                orch.consume()
+                n += 1
+                if n % 15 == 0:
+                    orch.sync()
+            except Exception:                     # the orchestrator must never take the probe down
+                pass
+            time.sleep(2)
+    threading.Thread(target=orchestrate, daemon=True, name="orchestrator").start()
 
     state = {"running": False}
     rescan = threading.Event()
@@ -256,7 +339,7 @@ def _run(args) -> int:
     if not args.no_ui:
         import uvicorn
         from .web.app import create_app
-        cfg = uvicorn.Config(create_app(store, scope, request_scan), host="127.0.0.1", port=args.port, log_level="warning")
+        cfg = uvicorn.Config(create_app(store, scope, request_scan, orch), host="127.0.0.1", port=args.port, log_level="warning")
         threading.Thread(target=uvicorn.Server(cfg).run, daemon=True).start()
         print(f"web view + API: http://127.0.0.1:{args.port}   (API docs: /api/docs)")
 
@@ -264,14 +347,18 @@ def _run(args) -> int:
         state["running"] = True
         store.reset()                             # inventory only: claims, events and scan history survive
         transport.sent.clear()
-        transport.set_rate(args.rate)
-        engine = Engine(scope, store, transport, budget_s=args.budget, tcp_ports=args.ports, max_hops=args.max_hops,
+        transport.set_rate(args.rate or 2500)
+        engine = Engine(scope, store, transport, budget_s=args.budget, tcp_ports=args.ports, rate_pps=args.rate, max_hops=args.max_hops,
                         allow_silent_hops=args.allow_silent_hops, enrich=not args.no_enrich, auditor=attestation,
+                        report_dir=DATA, priority_addresses=[x["address"] for x in grant.get("leads", [])],
+                        max_completeness_budget_s=args.max_minutes * 60, max_completeness_rounds=args.max_rounds,
                         on_done=lambda e: _print_result(store, transport, scope, attestation, e))
         try:
             engine.run()
         finally:
             state["running"] = False
+            orch.consume()
+            orch.sync()
         return engine
 
     try:
@@ -290,6 +377,7 @@ def _run(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global DATA
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0].startswith("-"):
         argv = ["run", *argv]                     # `python -m probe` alone means: go
@@ -298,22 +386,28 @@ def main(argv: list[str] | None = None) -> int:
 
     def common(p):
         p.add_argument("--scope", nargs="+", help="authorized CIDR(s); default: $PROBE_SCOPE or ./probe-scope.txt")
-        p.add_argument("--rate", type=int, default=2500, help="probes per second (default 2500; auto-halved on packet loss)")
+        p.add_argument("--rate", type=int, default=None, help="override probes/second (default: derived from the scope size; auto-halved on packet loss)")
         p.add_argument("--max-hops", type=int, default=8, help="the leash: deepest TTL ever used (default 8)")
-        p.add_argument("--ports", type=int, default=200, help="how many top-ranked TCP ports to SYN-scan (default 200)")
-        p.add_argument("--budget", type=float, default=170, help="seconds for one full scan pass (default 170)") if p.prog.endswith("plan") else None
+        p.add_argument("--ports", type=int, default=None, help="override how many top-ranked TCP ports to SYN-scan (default: derived from the scope size)")
+        p.add_argument("--budget", type=float, default=None, help="override seconds for one scan pass (default: derived)") if p.prog.endswith("plan") else None
 
     r = sub.add_parser("run", help="discover devices and segments inside the scope, then serve the API")
     common(r)
     r.add_argument("--iface", help="network interface (auto-detected if it has an address in scope)")
-    r.add_argument("--budget", type=float, default=170, help="seconds for one full scan pass (default 170)")
+    r.add_argument("--budget", type=float, default=None, help="override seconds for one scan pass (default: derived from the scope size)")
     r.add_argument("--once", action="store_true", help="exit after the scan instead of serving the API")
     r.add_argument("--no-enrich", action="store_true", help="skip the nmap service/banner enrichment")
     r.add_argument("--allow-silent-hops", type=int, default=0,
                    help="routers that never answer may be tolerated this many times per path (default 0 = strict fence)")
     r.add_argument("--allow-wide", action="store_true", help="accept a scope wider than a /16 (normally a typo)")
+    r.add_argument("--max-minutes", type=float, default=20.0,
+                   help="Discovery Completeness Manager: wall-clock ceiling for adaptive follow-up rounds, in minutes (default 20)")
+    r.add_argument("--max-rounds", type=int, default=6,
+                   help="Discovery Completeness Manager: maximum number of adaptive follow-up rounds (default 6)")
     r.add_argument("--port", type=int, default=8080)
     r.add_argument("--no-ui", action="store_true")
+    r.add_argument("--data-dir", default="probe-data", help="isolated results and audit directory")
+    r.add_argument("--authorisations", default="authorisations.json", help="explicit range-specific discovery grants")
     r.add_argument("--no-auditor", action="store_true", help="NOT recommended: skip the independent egress auditor")
     r.add_argument("--no-killswitch", action="store_true", help="NOT recommended: count strays but do not exit")
     common(sub.add_parser("plan", help="dry run: show what would be sent; sends nothing"))
@@ -323,6 +417,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--note", default="approved by the network owner")
     sub.add_parser("reset-tripwire", help="clear the kill-switch latch after human review")
     args = ap.parse_args(argv)
+    if args.cmd == "run":
+        DATA = Path(args.data_dir)
+        DATA.mkdir(parents=True, exist_ok=True)
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if args.cmd == "run":                          # the elevated relaunch has its own window: keep a readable record
         DATA.mkdir(exist_ok=True)
@@ -341,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "approve":
         DATA.mkdir(exist_ok=True)
         ScopeGuard.write_approval(DATA / "approvals.json", args.cidr, args.note)
-        print(f"recorded approval for {args.cidr}; the next run will include it in scope")
+        print(f"recorded approval for {args.cidr}; the next run may release its hold if it is already in the explicitly configured scope")
         return 0
     if args.cmd == "reset-tripwire":
         print("tripwire cleared" if KillSwitch.reset(DATA / "TRIPWIRE.json") else "no tripwire was set")
