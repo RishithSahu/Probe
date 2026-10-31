@@ -99,3 +99,31 @@ Probe's own packets go through one byte-level guard (destination in scope, not h
 an independent auditor process attests on the wire, a process fence blocks any other network use, and the machine must stay
 inside the permitted network or the agent dies. Other agents' network actions are **not** covered by Probe's guard: run them in a
 process that uses `ScopeGuard` before every send, and prefer an OS-level egress allow-list (`enforce/`) for web/binary tooling.
+
+## 7. The orchestrator (tasks for specialist agents)
+
+`probe/orchestrator.py` consumes the change feed and turns findings into tasks. It has no network access.
+
+**More event types** (in addition to section 3): `host.discovered` / `host.updated`, `service.discovered` / `service.updated`
+(a service identified after it was first found is an *update*, not a new service), `segment.found`, `network.candidate`
+(a network OUTSIDE the scope: recorded, never probed), `lead.recorded` (challenge-artifact locations), `task.*`.
+Every finding is announced once; the orchestrator's cursor moves only past events it handled, and it survives a rescan.
+
+| Call | Meaning |
+|---|---|
+| `GET /api/orchestrator` | cursor, task counts per specialist kind and state, failed and blocked tasks |
+| `POST /api/tasks/lease {kind, agent, ttl_s}` | atomically take the next task of that kind (`web`, `ssh`, `database`, `file-share`, `directory-and-name`, `remote-access`, `service-generic`, `network-structure`); the scope is re-checked at lease time |
+| `POST /api/tasks/complete {key, agent, result, ok}` | finish it; `ok:false` retries up to 3 attempts, then it is reported as failed |
+| `POST /api/tasks/approve {key, approved_by}` | a PERSON releases a blocked task; agents never call this |
+
+Task keys are `kind:address:port/proto`, so the same finding is one task however often it is reported; a later, better
+identification supersedes the generic task. Tasks are never created for out-of-scope or held addresses, and networks
+discovered outside the scope (`network.candidate`) become **blocked** tasks that cannot be leased: discovering a network or
+a challenge artifact never authorises acting on it.
+
+## 8. Report
+
+`GET /api/report` (also `probe-data/report.json` / `report.md`): devices (MAC, hostname, vendor/OS, open ports,
+confidence, segment, methods, first-seen, evidence), segments, `network_candidates` (confirmed / suspected / unverified, with a
+proposed CIDR and `probing: none`), challenge-artifact candidates (location only, value withheld), conflicts, limits of
+visibility, the decision journal, safety counters.

@@ -44,3 +44,27 @@ def top_tcp_ports(n: int) -> list[int]:
         except (OSError, ValueError):
             continue
     return list(FALLBACK_TOP_TCP[:n])
+
+
+_FALLBACK_NAMES = {21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "domain", 80: "http", 110: "pop3", 111: "rpcbind",
+                   135: "msrpc", 139: "netbios-ssn", 143: "imap", 443: "https", 445: "microsoft-ds", 993: "imaps",
+                   995: "pop3s", 1723: "pptp", 3306: "mysql", 3389: "ms-wbt-server", 5900: "vnc", 8080: "http-proxy"}
+_NAMES: dict[tuple[str, int], str] = {}
+
+
+def service_name(port: int, proto: str = "tcp") -> str | None:
+    """The IANA/nmap-services name registered for a port NUMBER. A guess about what runs there, never an identification:
+    callers must mark it as such (nmap's own convention is a trailing '?')."""
+    if not _NAMES:
+        for p in NMAP_SERVICES:
+            try:
+                for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and not line.startswith("#") and "/" in parts[1]:
+                        num, pr = parts[1].split("/")
+                        _NAMES.setdefault((pr, int(num)), parts[0])
+            except (OSError, ValueError):
+                continue
+        if not _NAMES:
+            _NAMES.update({("tcp", k): v for k, v in _FALLBACK_NAMES.items()})
+    return _NAMES.get((proto, port))

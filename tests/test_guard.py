@@ -18,6 +18,9 @@ ME, MAC = "192.168.60.68", "02:00:00:00:00:68"
 
 
 class NullNicTransport(GuardedTransport):
+    def _pick_interface(self):
+        self.my_ip, self.my_mac = ME, MAC
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.wire: list = []
@@ -103,15 +106,39 @@ class Latch(unittest.TestCase):
 
 
 class HoldAndApproval(unittest.TestCase):
-    def test_hold_blocks_deep_probes_only_until_approved(self):
+    def test_hold_blocks_deep_probes_for_the_life_of_the_run(self):
         tmp = Path(tempfile.mkdtemp()) / "a.json"
         scope = ScopeGuard([SCOPE], approvals_path=tmp)
         scope.hold("192.168.60.128/26", "t")
         self.assertTrue(scope.allow("192.168.60.140"), "classification probes are still allowed")
         self.assertFalse(scope.allow("192.168.60.140", deep=True))
         self.assertEqual(0, scope.stray_count, "a held target is not a stray probe")
+        ScopeGuard.write_approval(tmp, "192.168.60.128/26")      # an approval written mid-run changes nothing
+        with self.assertRaises(Exception):
+            scope.reload_approvals()
+        self.assertFalse(scope.allow("192.168.60.140", deep=True))
+
+    def test_scope_is_frozen_and_cannot_grow_at_runtime(self):
+        tmp = Path(tempfile.mkdtemp()) / "a.json"
+        scope = ScopeGuard([SCOPE], approvals_path=tmp)
+        self.assertTrue(scope.frozen)
+        ScopeGuard.write_approval(tmp, "10.99.0.0/24")           # even a legitimate-looking approval, mid-run
+        with self.assertRaises(Exception):
+            scope.reload_approvals()
+        self.assertFalse(scope.in_scope("10.99.0.5"))
+        self.assertEqual([SCOPE], [str(n) for n in scope.networks])
+
+    def test_a_hold_can_only_restrict_never_extend(self):
+        scope = ScopeGuard([SCOPE])
+        scope.hold("10.77.0.0/24", "discovered, not authorised")
+        self.assertFalse(scope.in_scope("10.77.0.9"))
+        self.assertEqual([SCOPE], [str(n) for n in scope.networks])
+
+    def test_approvals_present_at_startup_are_read_once(self):
+        tmp = Path(tempfile.mkdtemp()) / "a.json"
         ScopeGuard.write_approval(tmp, "192.168.60.128/26")
-        scope.reload_approvals()
+        scope = ScopeGuard([SCOPE], approvals_path=tmp)
+        scope.hold("192.168.60.128/26", "t")                      # operator pre-approved it: never held
         self.assertTrue(scope.allow("192.168.60.140", deep=True))
 
     def test_out_of_scope_is_never_allowed(self):

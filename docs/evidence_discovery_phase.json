@@ -1,0 +1,215 @@
+{
+ "generated": "2026-10-31 17:06:43",
+ "authorised_scope": [
+  "192.168.60.0/24"
+ ],
+ "scans": {
+  "scan1": {
+   "hosts": 196,
+   "open_ports": 254,
+   "services_identified": 67,
+   "segments": [
+    [
+     "192.168.60.0/24",
+     "in-scope",
+     "local",
+     null
+    ],
+    [
+     "192.168.60.28/32",
+     "in-scope",
+     "held",
+     "192.168.60.198"
+    ],
+    [
+     "192.168.61.0/24",
+     "outside-scope",
+     "held",
+     null
+    ],
+    [
+     "192.168.62.0/23",
+     "outside-scope",
+     "held",
+     null
+    ]
+   ],
+   "hidden_host_leads": [
+    [
+     "192.168.60.28",
+     "R7: it answered a TTL=1 packet addressed to 192.168.60.198's MAC (never forwarded, so it was delivered to 192.168.60.198's own network stack), yet it ignores AR"
+    ]
+   ],
+   "catch_all_decoys": [
+    "192.168.60.201",
+    "192.168.60.25",
+    "192.168.60.202",
+    "192.168.60.22"
+   ],
+   "packets_sent": 71899,
+   "sent_out_of_scope": 0,
+   "auditor": {
+    "t": 1793446191.1579952,
+    "frames_from_scanner": 78777,
+    "tagged_probes": 71899,
+    "violations": 0,
+    "id_collisions": 0
+   },
+   "seconds": null,
+   ".28": {
+    "mac": null,
+    "ttl": 64,
+    "verdict": "CONFIRMED_SEPARATE",
+    "answers": [
+     "icmp-echo"
+    ],
+    "ports": [],
+    "roles": []
+   },
+   ".198": {
+    "mac": "98:bd:80:9c:43:25",
+    "ttl": 128,
+    "verdict": "CONFIRMED_ONLINK",
+    "answers": [
+     "arp",
+     "tcp-ack:3306",
+     "tcp-syn:3306"
+    ],
+    "ports": [
+     [
+      3306,
+      "mysql",
+      null
+     ]
+    ],
+    "roles": [
+     "fronts-hidden-network"
+    ]
+   },
+   ".16": {
+    "mac": "60:45:2e:c6:d0:db",
+    "ttl": 128,
+    "verdict": "CONFIRMED_ONLINK",
+    "answers": [
+     "arp",
+     "tcp-ack:7070",
+     "tcp-ack:8080",
+     "tcp-syn:7070",
+     "tcp-syn:8080"
+    ],
+    "ports": [
+     [
+      7070,
+      null,
+      null
+     ],
+     [
+      8080,
+      null,
+      null
+     ]
+    ],
+    "roles": []
+   }
+  },
+  "scan2": {
+   "hosts": 190,
+   "open_ports": 246,
+   "services_identified": 60,
+   "segments": [
+    [
+     "192.168.60.0/24",
+     "in-scope",
+     "local",
+     null
+    ],
+    [
+     "192.168.61.0/24",
+     "outside-scope",
+     "held",
+     null
+    ],
+    [
+     "192.168.62.0/23",
+     "outside-scope",
+     "held",
+     null
+    ]
+   ],
+   "hidden_host_leads": [],
+   "catch_all_decoys": [
+    "192.168.60.202",
+    "192.168.60.249",
+    "192.168.60.25",
+    "192.168.60.201"
+   ],
+   "packets_sent": 73091,
+   "sent_out_of_scope": 0,
+   "auditor": {
+    "t": 1793446575.8315783,
+    "frames_from_scanner": 79335,
+    "tagged_probes": 73091,
+    "violations": 0,
+    "id_collisions": 0
+   },
+   "seconds": 202.4,
+   ".28": {
+    "mac": null,
+    "ttl": 64,
+    "verdict": "SUSPECTED_SEPARATE",
+    "answers": [
+     "icmp-echo",
+     "tcp-ack:443",
+     "tcp-ack:80",
+     "tcp-rst:1",
+     "tcp-rst:100"
+    ],
+    "ports": [],
+    "roles": []
+   },
+   ".198": {
+    "mac": "98:bd:80:9c:43:25",
+    "ttl": 128,
+    "verdict": "CONFIRMED_ONLINK",
+    "answers": [
+     "arp",
+     "tcp-ack:3306",
+     "tcp-syn:3306"
+    ],
+    "ports": [
+     [
+      3306,
+      "mysql",
+      null
+     ]
+    ],
+    "roles": []
+   },
+   ".16": {
+    "mac": "60:45:2e:c6:d0:db",
+    "ttl": 128,
+    "verdict": "CONFIRMED_ONLINK",
+    "answers": [
+     "arp",
+     "tcp-ack:7070",
+     "tcp-ack:8080",
+     "tcp-syn:7070",
+     "tcp-syn:8080"
+    ],
+    "ports": [
+     [
+      7070,
+      null,
+      null
+     ],
+     [
+      8080,
+      null,
+      null
+     ]
+    ],
+    "roles": []
+   }
+  }
+ }
+}

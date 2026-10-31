@@ -79,6 +79,9 @@ class TerritoryCheck(unittest.TestCase):
 
 
 class NullNic(GuardedTransport):
+    def _pick_interface(self):
+        self.my_ip, self.my_mac = ME, MAC
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.wire = []
@@ -189,8 +192,8 @@ class WrongRangeDiesAtStart(unittest.TestCase):
 
     def test_range_this_machine_is_not_in_dies_before_a_single_packet(self):
         out = self.run_cli("10.250.250.0/24")             # valid private range, but we are not in it
-        self.assertEqual(6, out.returncode, out.stdout + out.stderr)
-        self.assertIn("WRONG RANGE", out.stderr)
+        self.assertEqual(8, out.returncode, out.stdout + out.stderr)
+        self.assertIn("AUTHORISATION NOT VERIFIED", out.stderr)
         self.assertNotIn("auditor", out.stdout)           # died before even starting anything else
 
 

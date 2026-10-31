@@ -69,9 +69,10 @@ class Attestation:
     heartbeat is still fresh); a heartbeat older than STALE_AFTER seconds, a violation, or a missing
     auditor is not."""
 
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, *, scope_digest=None, run_id=None):
         self.dir = Path(state_dir)
         self._last: dict = {}
+        self.scope_digest, self.run_id = scope_digest, run_id
 
     def _read(self) -> dict | None:
         best = None
@@ -97,6 +98,13 @@ class Attestation:
         hb = self._read() or self._last
         if not hb:
             return False, "auditor heartbeat missing"
+        if self.scope_digest is not None:
+            if hb.get("scope_digest") != self.scope_digest or hb.get("run_id") != self.run_id:
+                return False, "auditor attests a different run or scope"
+            if not hb.get("capture_ready"):
+                return False, "independent capture is not ready/alive"
+            if not hb.get("helper_egress_verified"):
+                return False, "independent helper egress is not verified"
         if time.time() - hb["t"] > STALE_AFTER:
             return False, "auditor heartbeat stale"
         if hb.get("violations", 0):
@@ -117,17 +125,26 @@ def main(argv=None) -> int:
     ap.add_argument("--ip", help="the scanner's own address: it must stay inside the scope, on this interface")
     ap.add_argument("--ifindex", type=int, default=0)
     ap.add_argument("--iface-name", default=None)
+    ap.add_argument("--run-id", required=True)
+    ap.add_argument("--egress-policy", required=True)
     a = ap.parse_args(argv)
 
     from scapy.all import conf
     conf.verb = 0
     nets = [ipaddress.ip_network(s, strict=False) for s in a.scope]
+    from .authorisation import scope_digest
+    from . import egress
+    digest = scope_digest(a.scope)
+    policy = json.loads(Path(a.egress_policy).read_text(encoding="utf-8"))
+    if policy["scope_digest"] != digest:
+        raise ValueError("independent egress policy does not match auditor scope")
     mac, state = a.mac.lower(), Path(a.state)
     state.mkdir(exist_ok=True)
     (state / VIOLATION).unlink(missing_ok=True)
     counters = {"frames_from_scanner": 0, "tagged_probes": 0, "violations": 0, "id_collisions": 0}
     mac_b = bytes.fromhex(mac.replace(":", ""))
     stop_flag = {"stop": False}
+    capture = {"ready": False, "error": None}
 
     ranges = [(int(n.network_address), int(n.broadcast_address)) for n in nets if n.version == 4]
 
@@ -160,14 +177,20 @@ def main(argv=None) -> int:
                 violation(".".join(map(str, dst.to_bytes(4, "big"))), f"tagged {kind}", raw)
 
     def sniff_loop() -> None:
-        sock = conf.L2listen(iface=a.iface, filter=f"ether src {mac}")
+        try:
+            sock = conf.L2listen(iface=a.iface, filter=f"ether src {mac}")
+            capture["ready"] = True
+        except Exception as exc:
+            capture["error"] = str(exc)
+            return
         while stop_flag["stop"] is False:
             try:
                 _cls, raw, _ts = sock.recv_raw(65535)
-            except Exception:
+            except Exception as exc:
                 logging.exception("capture error")
-                time.sleep(0.2)
-                continue
+                capture["error"] = str(exc)
+                capture["ready"] = False
+                break
             if raw:
                 on_raw(bytes(raw))
         sock.close()
@@ -193,8 +216,15 @@ def main(argv=None) -> int:
                 ok, why = territory.check()
                 if not ok:
                     violation("<territory>", f"scanner left the permitted network: {why}")
+            ok, why = egress.check(Path(a.egress_policy), expected=policy)
+            if not ok:
+                violation("<helper-egress>", "independent scope enforcement cannot be verified: " + why)
+            if capture["error"] or not sniffer.is_alive():
+                violation("<capture>", "independent capture failed: " + str(capture["error"]))
             try:                                      # a hiccup writing the heartbeat must never kill the auditor
-                (state / HEARTBEATS[n % 2]).write_text(json.dumps({"t": time.time(), **counters}), encoding="utf-8")
+                (state / HEARTBEATS[n % 2]).write_text(json.dumps({"t": time.time(), **counters,
+                    "scope_digest": digest, "run_id": a.run_id, "auditor_pid": os.getpid(),
+                    "capture_ready": capture["ready"] and sniffer.is_alive(), "helper_egress_verified": ok}), encoding="utf-8")
             except OSError as exc:
                 logging.warning("heartbeat write failed (will retry): %s", exc)
             n += 1

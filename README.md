@@ -2,11 +2,19 @@
 
 Autonomous network discovery agent: finds every device that answers anything inside an
 authorised scope, works out which separate networks they sit on, flags networks a standard
-ping sweep would miss, and never sends a packet outside the scope. General purpose — the scope
+ping sweep would miss, and never sends a packet outside the scope. General purpose â€” the scope
 is a runtime argument; nothing is specific to any one network.
 
 Read [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) for the design, the proof rules and the
 scope-safety layers.
+
+## Live-run scope preflight
+
+Live discovery now requires `authorisations.json` with explicit discovery/inventory grants matching the configured scope. A discovered address, service reference, or interface supernet cannot extend that scope. `probe approve` releases holds only within the explicit scope.
+
+Windows runs additionally require independently verified Nmap program firewall rules. The run writes an exact policy to its data directory and refuses before any traffic if the rules are missing. Install those rules with administrator rights using `enforce/windows-program-scope.ps1 -PolicyFile <data-directory>/egress-policy.json -Install`, then rerun. The auditor must remain enabled; it verifies capture health, run identity, effective scope, and helper egress continuously. Other platforms currently refuse live execution until an independent enforcement adapter is provided.
+
+Use `--data-dir <directory>` to isolate new reports and audit records. See [the Network Roamer review](docs/reviews/2026-10-31-roamer.md) for the current validation result and remaining capabilities.
 
 ## Run
 

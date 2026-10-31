@@ -9,6 +9,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .netutil import address_part, like_escape, norm_ip
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS hosts (
     ip TEXT PRIMARY KEY,
@@ -92,6 +94,15 @@ CREATE TABLE IF NOT EXISTS scans (
     id INTEGER PRIMARY KEY AUTOINCREMENT, started REAL NOT NULL, finished REAL, status TEXT NOT NULL,
     scope TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '{}'
 );
+-- Append-only observation ledger: survives reset()/rescan. A row is a dated fact ("this scan saw X"), never
+-- overwritten -- so a Completeness Manager (or a person) can tell what THIS run established from what an older
+-- scan once saw, instead of an old observation silently being reused as today's proof.
+CREATE TABLE IF NOT EXISTS observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id INTEGER, ts TEXT NOT NULL,
+    ip TEXT NOT NULL, port INTEGER, proto TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL,
+    value TEXT, note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_observations_ip_kind ON observations (ip, kind);
 """
 
 
@@ -123,14 +134,52 @@ class Store:
                 self._conn.execute(f"ALTER TABLE hosts ADD COLUMN {col} {ddl}")
             except sqlite3.OperationalError:
                 pass
+        for tbl, col, ddl in (("hosts", "hostname", "TEXT"), ("hosts", "hostname_source", "TEXT"), ("hosts", "os_detail", "TEXT"),
+                              ("hosts", "device_type", "TEXT"), ("ports", "method", "TEXT"), ("ports", "found_at", "TEXT"), ("ports", "identification", "TEXT"),
+                              ("ports", "ident_note", "TEXT")):
+            try:
+                self._conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass
         self.exec, self.query = self._x, self._q         # public handles for the mesh layer
         self._conn.commit()
 
     def reset(self) -> None:
         with self._lock:
-            for t in ("hosts", "ports", "edges", "segments", "leads", "stray_probes", "meta"):
+            for t in ("hosts", "ports", "edges", "segments", "leads", "stray_probes"):
                 self._conn.execute(f"DELETE FROM {t}")
-            self._conn.commit()
+            self._conn.execute("DELETE FROM meta WHERE key NOT LIKE 'orchestrator.%'")   # the consumer's cursor survives a rescan
+            self._conn.commit()                 # 'observations' is deliberately NOT cleared here: it is the history
+
+    # ---- append-only observation ledger (history; never the current-proof table) --------------------------------
+    def add_observation(self, scan_id: int | None, ip: str, kind: str, value, *, port: int | None = None,
+                        proto: str = "", note: str = "") -> None:
+        self._x("INSERT INTO observations (scan_id, ts, ip, port, proto, kind, value, note) VALUES (?,?,?,?,?,?,?,?)",
+                (scan_id, _now(), ip, port, proto, kind, json.dumps(value) if not isinstance(value, str) else value, note))
+
+    def observations_for(self, ip: str, kind: str | None = None, *, since_scan_id: int | None = None) -> list[dict]:
+        target = norm_ip(ip)
+        if target is None:
+            return []
+        sql = "SELECT * FROM observations WHERE ip=? "
+        args: list = [target]
+        if kind is not None:
+            sql += "AND kind=? "
+            args.append(kind)
+        if since_scan_id is not None:
+            sql += "AND (scan_id IS NULL OR scan_id>=?) "
+            args.append(since_scan_id)
+        return self._q(sql + "ORDER BY id", tuple(args))
+
+    def ever_observed(self, kind: str, *, min_scan_id: int | None = None) -> set[str]:
+        """Addresses that showed `kind` in ANY past scan -- used to keep an anomaly in the priority queue even after
+        its CURRENT classification stops flagging it. History, so it is never treated as this run's own proof."""
+        sql = "SELECT DISTINCT ip FROM observations WHERE kind=?"
+        args: list = [kind]
+        if min_scan_id is not None:
+            sql += " AND (scan_id IS NULL OR scan_id>=?)"
+            args.append(min_scan_id)
+        return {r["ip"] for r in self._q(sql, tuple(args))}
 
     def _x(self, sql: str, args: tuple = ()):
         with self._lock:
@@ -166,22 +215,23 @@ class Store:
         for k in ("visible_to", "reasons", "roles", "agents", "vantages"):
             if k in fields and not isinstance(fields[k], str):
                 fields[k] = json.dumps(fields[k])
-        allowed = {"vendor", "os_guess", "hops", "via", "held", "status", "mac", "verdict", "distance", "visible_to", "reasons", "roles", "agents", "vantages"}
+        allowed = {"ttl", "vendor", "os_guess", "hops", "via", "held", "status", "mac", "verdict", "distance", "visible_to", "reasons", "roles", "agents", "vantages", "hostname", "hostname_source", "os_detail", "device_type"}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
         cols = ", ".join(f"{k}=?" for k in sets)
         self._x(f"UPDATE hosts SET {cols} WHERE ip=?", (*sets.values(), ip))
 
-    def add_port(self, ip: str, port: int, *, proto: str = "tcp", service: str | None = None) -> None:
-        self._x("INSERT INTO ports (host_ip, port, proto, service) VALUES (?,?,?,?)"
+    def add_port(self, ip: str, port: int, *, proto: str = "tcp", service: str | None = None,
+                 method: str = "tcp-syn-probe") -> None:
+        self._x("INSERT INTO ports (host_ip, port, proto, service, method, found_at, identification) VALUES (?,?,?,?,?,?,'discovered')"
                 " ON CONFLICT(host_ip, port, proto) DO UPDATE SET service=COALESCE(excluded.service, service)",
-                (ip, port, proto, service))
+                (ip, port, proto, service, method, _now()))
 
     def hosts(self) -> list[dict]:
         rows = self._q("SELECT * FROM hosts ORDER BY ip")
         ports: dict[str, list[dict]] = {}
-        for p in self._q("SELECT host_ip, port, proto, service, product, version, extrainfo, banner, scripts FROM ports ORDER BY port"):
+        for p in self._q("SELECT host_ip, port, proto, service, product, version, extrainfo, banner, scripts, method, found_at, identification, ident_note FROM ports ORDER BY port"):
             ports.setdefault(p["host_ip"], []).append(p)
         for r in rows:
             r["open_ports"] = ports.get(r["ip"], [])
@@ -231,10 +281,23 @@ class Store:
     # ---- leads / audit ----------------------------------------------------------
     def add_lead(self, address: str, evidence: str, source: str) -> None:
         self._x("INSERT INTO leads (address, evidence, source, found_at) VALUES (?,?,?,?)"
-                " ON CONFLICT(address, source) DO UPDATE SET count=count+1", (address, evidence, source, _now()))
+                " ON CONFLICT(address, source) DO UPDATE SET count=count+1, evidence=excluded.evidence",
+                (address, evidence, source, _now()))
 
-    def clear_leads(self, source_prefix: str) -> None:
-        self._x("DELETE FROM leads WHERE source LIKE ?", (source_prefix + "%",))
+    def clear_leads(self, source: str) -> None:
+        """Remove leads of one kind: source 'anomaly' removes 'anomaly' and every 'anomaly:<sub>' kind, never an
+        unrelated kind that merely starts with the same letters."""
+        self._x("DELETE FROM leads WHERE source = ? OR source LIKE ? ESCAPE '\\'", (source, like_escape(source) + ":%"))
+
+    def leads_for_ip(self, ip: str) -> list[dict]:
+        """Leads about exactly this host ('10.0.0.5' or '10.0.0.5:80'); '10.0.0.5' never matches '10.0.0.55'."""
+        target = norm_ip(ip)
+        return [] if target is None else [l for l in self.leads() if address_part(l["address"]) == target]
+
+    def mark_ident(self, ip: str, port: int, proto: str, state: str, note: str) -> None:
+        """Record that service identification was attempted (or not) for a port, without discarding the port."""
+        self._x("UPDATE ports SET identification=?, ident_note=? WHERE host_ip=? AND port=? AND proto=?"
+                " AND COALESCE(identification,'discovered') IN ('discovered','guessed')", (state, note, ip, port, proto))
 
     def leads(self) -> list[dict]:
         return self._q("SELECT * FROM leads ORDER BY count DESC, address")
@@ -268,19 +331,46 @@ class Store:
                 " discovery_methods=excluded.discovery_methods, last_seen=excluded.last_seen", rows)
             self._conn.commit()
 
+    def label_unidentified_ports(self, namer) -> int:
+        """Ports nmap did not identify get the registered name for their NUMBER, marked as a guess with nmap's trailing '?'.
+        A port that was identified (service set) is never touched."""
+        n = 0
+        with self._lock:
+            for r in self._conn.execute("SELECT host_ip, port, proto FROM ports WHERE service IS NULL OR service=''").fetchall():
+                name = namer(r["port"], r["proto"])
+                if name:
+                    self._conn.execute("UPDATE ports SET service=?, identification=CASE WHEN COALESCE(identification,'discovered')"
+                                       "='discovered' THEN 'guessed' ELSE identification END WHERE host_ip=? AND port=? AND proto=?",
+                                       (name + "?", r["host_ip"], r["port"], r["proto"]))
+                    n += 1
+            self._conn.commit()
+        return n
+
     def bulk_add_ports(self, pairs: list[tuple[str, int]]) -> None:
         with self._lock:
-            self._conn.executemany("INSERT OR IGNORE INTO ports (host_ip, port, proto) VALUES (?,?, 'tcp')", pairs)
+            self._conn.executemany("INSERT OR IGNORE INTO ports (host_ip, port, proto, method, found_at, identification) VALUES (?,?, 'tcp', 'tcp-syn-probe', ?, 'discovered')",
+                                      [(a, b, _now()) for a, b in pairs])
             self._conn.commit()
 
     def upsert_service(self, ip: str, port: int, *, service=None, product=None, version=None, extrainfo=None,
-                       banner=None, scripts: dict | None = None, proto: str = "tcp") -> None:
-        self._x("INSERT INTO ports (host_ip, port, proto, service, product, version, extrainfo, banner, scripts)"
-                " VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(host_ip, port, proto) DO UPDATE SET"
+                       banner=None, scripts: dict | None = None, proto: str = "tcp", method: str = "nmap-service-detection") -> None:
+        name = (service or "").strip()
+        if product:
+            ident, note = "identified-product", None
+        elif name and not name.endswith("?") and name not in ("unknown", "tcpwrapped"):
+            ident, note = "identified", None
+        else:
+            ident, note = "unidentified-attempted", "nmap connected to the port but could not name the service (unknown/tcpwrapped)"
+        self._x("INSERT INTO ports (host_ip, port, proto, service, product, version, extrainfo, banner, scripts, method, found_at,"
+                " identification, ident_note)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_ip, port, proto) DO UPDATE SET"
+                " identification=excluded.identification, ident_note=excluded.ident_note,"
                 " service=COALESCE(excluded.service, service), product=COALESCE(excluded.product, product),"
                 " version=COALESCE(excluded.version, version), extrainfo=COALESCE(excluded.extrainfo, extrainfo),"
-                " banner=COALESCE(excluded.banner, banner), scripts=excluded.scripts",
-                (ip, port, proto, service, product, version, extrainfo, banner, json.dumps(scripts or {})))
+                " banner=COALESCE(excluded.banner, banner), scripts=json_patch(ports.scripts, excluded.scripts),"
+                " method=CASE WHEN COALESCE(ports.method,'tcp-syn-probe')='tcp-syn-probe' THEN 'tcp-syn-probe+' || excluded.method"
+                " ELSE ports.method END",
+                (ip, port, proto, service, product, version, extrainfo, banner, json.dumps(scripts or {}), method, _now(), ident, note))
 
     # ---- shared ledger for the other agents ---------------------------------------------------------------------
     def add_event(self, type_: str, payload: dict) -> int:
@@ -326,7 +416,7 @@ class Store:
         return {"ok": True, "status": "done" if ok else "failed"}
 
     def claims(self, prefix: str = "") -> list[dict]:
-        rows = self._q("SELECT * FROM claims WHERE key LIKE ? ORDER BY claimed_at DESC", (prefix + "%",))
+        rows = self._q("SELECT * FROM claims WHERE key LIKE ? ESCAPE '\\' ORDER BY claimed_at DESC", (like_escape(prefix) + "%",))
         for r in rows:
             r["result"] = json.loads(r["result"]) if r["result"] else None
         return rows

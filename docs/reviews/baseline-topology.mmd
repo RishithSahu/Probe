@@ -1,0 +1,9 @@
+flowchart LR
+  scanner["Scanner 192.168.60.68"] -->|configured interface; not permission| link["Configured link 192.168.60.0/22"]
+  link -->|previous ARP and ICMP evidence| entry["192.168.60.139"]
+  entry -->|previous TCP SYN-ACK| http["TCP 80; service not identified"]
+  http -. "backend topology not established" .-> unknown["Backend address and prefix UNKNOWN"]
+  link --> front69["192.168.60.69"]
+  front69 -->|previous controlled TTL evidence| backend69["Forwarded TCP 5001 and 5050; backend UNKNOWN"]
+  link --> front209["192.168.60.209"]
+  front209 -->|previous controlled TTL evidence| backend209["Forwarded TCP 8000 and 8081; backend UNKNOWN"]

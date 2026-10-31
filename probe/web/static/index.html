@@ -65,7 +65,7 @@ function render(s) {
     s.hosts.map(h => row([esc(h.ip), esc(h.mac || "–"), esc(h.vendor || "–"),
       esc(h.verdict.replace("CONFIRMED_", "").toLowerCase() + (h.distance ? ` (${h.distance} hop)` : "")),
       esc((h.visible_to || []).join(", ")),
-      esc(h.held ? "not scanned (held segment)" : h.open_ports.map(p => p.port).join(", ") || "–")],
+      esc(h.held ? "not scanned (held segment)" : h.open_ports.map(p => p.port + "/" + (p.proto || "tcp") + " " + (p.product ? p.product + (p.version ? " " + p.version : "") : (p.service || "?")) + " [" + (p.identification || "discovered") + "]").join(", ") || "–")],
       h.held ? "held" : "")).join("");
 
   const lead = s.leads.filter(l => l.source.startsWith("unconfirmed") || l.source === "outside-scope-address" || l.source.startsWith("passive"));

@@ -1,3 +1,2 @@
-# The authorised range(s) -- this IS the fence. One CIDR per line; nothing outside it is ever probed.
-# Overridden by --scope or the PROBE_SCOPE environment variable.
+# Explicit discovery boundary; neighbouring link addresses require separate recorded grants.
 192.168.60.0/24
