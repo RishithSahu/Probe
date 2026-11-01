@@ -24,6 +24,7 @@ from app.adapters.network_graph_adapter import (
 from app.adapters.probe_leads import findings_from_probe_leads
 from app.agents.binary_analysis.agent import run_binary_analysis_agent
 from app.agents.network_security.console_auth import attempt_single_credential_verification
+from app.agents.network_security.console_session_agent import run_llm_driven_console_session
 from app.agents.network_vulnerability.agent import run_network_vulnerability_agent
 from app.agents.web_security.agent import WebTarget, run_web_security_agent
 from app.analysis.attack_paths import build_attack_path_graph
@@ -669,6 +670,98 @@ def execute_authorised_credential_access(
         tool_executions=[{"tool": "console_auth", "op": "verify", "target": service_id,
                           "outcome": auth_result.outcome}],
         errors=[auth_result.error] if auth_result.error else [],
+    )
+
+
+def execute_console_session(
+    assessment_id: str, credential_ref: str, *, asset_id: str, service_id: str, host: str, port: int,
+    guard: ScopeGuard, operator_instruction: str,
+) -> AgentResult:
+    """Transitions a BLOCKED `console_session` task to an approved, executing state on a recorded operator
+    approval, then -- exactly like `execute_authorised_credential_access` above, which this mirrors -- makes
+    one authenticated connection and lets `run_llm_driven_console_session` continue the SAME session under
+    an LLM's direction, bounded by its own step/time limits. Never called automatically -- only in direct
+    response to an explicit, recorded instruction naming this credential_ref and target."""
+    from app.core.protected_storage import get_provenance, retrieve_secret
+    from app.core.schemas import AgentTask
+
+    session_task_id, session_fingerprint = make_task_id("console_session", assessment_id, credential_ref)
+    provenance = get_provenance(credential_ref)
+
+    with session_scope() as db:
+        repository.upsert_agent_task(db, AgentTask(
+            task_id=session_task_id, assessment_id=assessment_id, agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE,
+            task_type="console_session",
+            input_data={"credential_ref": credential_ref, "service_id": service_id, "asset_id": asset_id,
+                       "source_binary_sha256": provenance.get("source_binary_sha256")},
+            status=TaskStatus.RUNNING, started_at=_now(), task_fingerprint=session_fingerprint,
+        ))
+        repository.log_event(
+            db, assessment_id, AgentId.HIDDEN_SERVICES_DETECTIVE.value,
+            f"operator approval recorded for {session_task_id}: credential_ref={credential_ref} "
+            f"evidence=source_binary_sha256:{provenance.get('source_binary_sha256')} target={service_id} "
+            f"instruction={operator_instruction!r}",
+        )
+
+    secret = retrieve_secret(credential_ref)
+    session_result = run_llm_driven_console_session(
+        host, port, secret, asset_id=asset_id, service_id=service_id, scope_guard=guard,
+    )
+    del secret
+
+    transcript_text = "\n".join(
+        (f">>> {t.sent}\n{t.received}" if t.sent is not None else t.received) for t in session_result.transcript
+    )
+    finding = Finding(
+        finding_id=f"FINDING-console-session-{credential_ref}",
+        assessment_id=assessment_id, agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE, surface=Surface.NETWORK,
+        asset_id=asset_id, service_id=service_id,
+        title="LLM-driven authenticated console session",
+        description=(
+            f"An authenticated console session against {service_id} was continued under LLM direction for "
+            f"{session_result.steps_taken} step(s). Outcome: {session_result.outcome}."
+            + (f" Extracted: {session_result.extracted_deliverable}" if session_result.extracted_deliverable else "")
+            + (f" Error: {session_result.error}" if session_result.error else "")
+        ),
+        severity=Severity.INFO, confidence=Confidence.HIGH, status=FindingStatus.CONFIRMED,
+        verification_required=False, ptes_phase=PtesPhase.EXPLOITATION,
+        detection_method="llm_driven_console_session",
+    )
+    evidence = Evidence(
+        evidence_id=f"EVIDENCE-console-session-{credential_ref}", finding_id=finding.finding_id,
+        evidence_type="console_session_transcript", source_tool="network_security_agent(console_session_agent)",
+        description=f"Full session transcript from {host}:{port}, {session_result.duration_seconds:.2f}s total.",
+        raw_data={"outcome": session_result.outcome, "transcript": transcript_text,
+                  "extracted_deliverable": session_result.extracted_deliverable,
+                  "steps_taken": session_result.steps_taken, "credential_ref": credential_ref},
+    )
+
+    with session_scope() as db:
+        repository.upsert_agent_task(db, AgentTask(
+            task_id=session_task_id, assessment_id=assessment_id, agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE,
+            task_type="console_session",
+            input_data={"credential_ref": credential_ref, "service_id": service_id, "asset_id": asset_id},
+            output_data={"outcome": session_result.outcome,
+                        "extracted_deliverable": session_result.extracted_deliverable},
+            status=TaskStatus.COMPLETED if session_result.outcome not in ("error",) else TaskStatus.FAILED,
+            error_message=session_result.error, completed_at=_now(), task_fingerprint=session_fingerprint,
+        ))
+        repository.store_findings(db, [finding], [evidence])
+        for record in guard.audit_log:
+            repository.store_tool_invocation_log(db, assessment_id, "scope_guard", record)
+        repository.log_event(
+            db, assessment_id, AgentId.HIDDEN_SERVICES_DETECTIVE.value,
+            f"console session completed for {session_task_id}: outcome={session_result.outcome} "
+            f"steps={session_result.steps_taken} extracted={session_result.extracted_deliverable!r}",
+        )
+
+    return AgentResult(
+        agent_id=AgentId.HIDDEN_SERVICES_DETECTIVE, assessment_id=assessment_id,
+        execution_status=TaskStatus.COMPLETED if session_result.outcome not in ("error",) else TaskStatus.FAILED,
+        findings=[finding], evidence=[evidence],
+        tool_executions=[{"tool": "console_session_agent", "op": "drive_session", "target": service_id,
+                          "outcome": session_result.outcome, "steps_taken": session_result.steps_taken}],
+        errors=[session_result.error] if session_result.error else [],
     )
 
 

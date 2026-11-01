@@ -18,6 +18,9 @@ httpx==0.28.1
 # Binary Analysis Agent
 pefile==2024.8.26
 
+# Network Security Agent (LLM-driven authenticated console-session continuation)
+openai==1.97.0
+
 # Analysis / reporting
 networkx==3.3
 Jinja2==3.1.3

@@ -999,8 +999,8 @@ the authorised `NetworkGraph`.
      listing format, not one application's).
 
   **Verified end to end against the real host** (not asserted from
-  code reading): `discover_hidden_paths('http://192.168.60.139/', ...,
-  extra_headers={'X-Forwarded-For': '192.168.60.1'})` now returns
+  code reading): `discover_hidden_paths('http://<lab-host>/', ...,
+  extra_headers={'X-Forwarded-For': '<lab-gateway>'})` now returns
   `binary_references=[BinaryReference(url='.../vault/keykeeper',
   content_type='application/octet-stream', ...)]` -- the exact binary
   this session's manual investigation found, now discovered by the
@@ -1025,3 +1025,52 @@ the authorised `NetworkGraph`.
   automated agent at all -- `execute_authorised_credential_access`
   only ever makes ONE AUTH attempt and is never called automatically,
   by design. Both are real, separate gaps from the three fixed here.
+
+- **Entry 17** — Ghidra and the console's multi-step protocol (the two gaps
+  Entry 16 explicitly left open). Downloaded and extracted Ghidra 12.2
+  (the latest release) locally; Java 17 was already present. Built a new,
+  generic `app/agents/network_security/console_session_agent.py`:
+  `run_llm_driven_console_session()` performs the same single AUTH attempt
+  as `console_auth.attempt_single_credential_verification`, then — only on
+  success — hands the growing transcript to an LLM each turn, asking for
+  exactly one line to send next (or DONE), so the service's OWN documented
+  protocol (its banner, its HELP output, whatever it says) drives what
+  happens, rather than hardcoding one target's command sequence. Bounded by
+  both a step count and a wall-clock budget regardless of what the model
+  decides; the only side effect it can produce is "send this one line to
+  the already-authenticated, already-scoped socket." A generic
+  `WORD{...}`-shaped pattern match stops the loop early and records the
+  extracted value.
+
+  Wired into the orchestrator with the exact same explicit-approval gate as
+  credential access: `execute_console_session()` in
+  `app/orchestrator/nodes.py` mirrors `execute_authorised_credential_access`
+  line for line — a BLOCKED `console_session` task transitions to RUNNING
+  only on a recorded operator approval naming the credential_ref and
+  target, retrieves the secret via `protected_storage.retrieve_secret`,
+  and is never auto-dispatched by the scheduler. `ScopeGuard.check_console_auth_allowed`
+  (`allow_single_credential_verification`) gates it exactly as before.
+
+  Found and fixed a real bug in `_recv_all` while writing the first test
+  against a local multi-step server: the original version kept blocking
+  for the *full* read timeout on every call even after a complete response
+  had already arrived, because nothing told it the peer was done sending —
+  a 5-step session would have cost 5× the per-read timeout for no reason,
+  and in one test it caused the SERVER side to time out and drop the
+  connection mid-session before the client ever got to send its next line.
+  Fixed by only waiting the full timeout for the first chunk of a response,
+  then a short (0.2s) grace period for any trailing bytes already in flight.
+
+  Added `openai==1.97.0` to `requirements.txt` (was already installed in
+  this environment but undeclared). New
+  `tests/test_console_session_agent.py` (5 tests, LLM calls monkeypatched —
+  what's under test is the session-driving loop, bounds and deliverable
+  extraction, not any model's behaviour): a full AUTH→WHOAMI→PIDREQ flag
+  extraction against a local TCP server, early stop on DONE, the max_steps
+  ceiling actually holding when a model never stops itself, the scope-guard
+  denial firing before any socket opens, and an honest `connection_refused`
+  outcome. Full suite (527 tests) passes.
+
+  Not yet done: the orchestrator has not been re-run against the real lab
+  network with this new chain wired up end to end — that is the explicit
+  next step, now that both of Entry 16's open gaps are closed.
