@@ -939,3 +939,89 @@ the authorised `NetworkGraph`.
   web services (not an overcorrection to "deny everything"); an explicit,
   non-empty `approved_web_origins` still overrides the default exactly as
   before. Full suite: **499 passed, 4 skipped**, re-run twice clean.
+
+- **Entry 16** — Diagnosed, precisely, why the automated pipeline could
+  never have found the `.139:8833` "Game Zone" console/binary chain this
+  session's manual investigation found by hand, then fixed each root
+  cause generically (nothing here is specific to that one challenge).
+  Three separate, compounding gaps, each confirmed against the real
+  host, not assumed:
+
+  1. **The service was never even connected to.** `run_network_
+     vulnerability_agent`'s own pre-filter (`_CHECKED_SERVICE_NAMES`)
+     skipped any service whose name/port wasn't on its small named-
+     protocol allowlist *before* `assess_service` ever ran -- "no check
+     implemented" silently meant "never even looked," not "looked and
+     found nothing." Port 8833's banner (which literally says "the
+     passkey lives inside a binary you had to find and reverse") was
+     therefore never read by anything automated. Fixed with a new
+     `check_unknown_service()` (`app/agents/network_vulnerability/
+     checks.py`): the same bounded, read-only, single-recv banner grab
+     every other check here already does, now the fallback for ANY
+     service with no more specific check, reported as a `flagged`
+     (not merely `observed`) info-severity finding so a human has
+     something to act on instead of a silent gap. Verified against the
+     real host: the finding's evidence now carries the real banner text
+     verbatim.
+  2. **The hidden vault was never found because nothing tried the
+     header that gates it.** `content_discovery.py`'s own docstring was
+     explicit that `extra_headers` must come from an already-recorded
+     authorisation, never be invented -- correct for *arbitrary*
+     headers, but this project had no generic mechanism at all for the
+     well-known, real pentesting technique of testing whether access
+     control trusts a client-controllable header (X-Forwarded-For and
+     similar) rather than the real connection. Added
+     `discover_via_trusted_proxy_headers()`: tries a small, generic
+     header list against a small, generic value list (127.0.0.1,
+     localhost, 0.0.0.0) PLUS one computed heuristic -- `<network>.1`,
+     a near-universal default-gateway convention for a /24, derived
+     from the asset's own IP, never hardcoded to one target. On the
+     real host, this correctly found `X-Forwarded-For: <gateway>` as
+     the winning header using ONLY that generic heuristic, with no
+     knowledge of the specific answer. A hit becomes a `medium`-severity
+     finding (`findings_from_access_control_bypass_hits`), and
+     `web_security/agent.py`'s Stage E now automatically re-runs the
+     same bounded content-discovery sweep under the winning header --
+     which is what actually finds gated content, not just flags that
+     something is gated.
+  3. **Even gated, the binary was still invisible, because nothing
+     followed a discovered directory to see what's in it.**
+     `discover_hidden_paths` recorded a wordlist hit's status/redirect/
+     length and stopped -- a 308 redirect (the normal shape of "this
+     path is a real directory") was never actually followed, so a
+     binary linked from that directory's own listing page was never
+     seen. Added `_follow_listing_and_check_children()`: follows that
+     ONE redirect, reads the listing, and applies the exact same
+     binary-looking check already used for ordinary wordlist hits to
+     every link that stays under the same directory (never a parent/
+     nav link elsewhere on the site) -- bounded
+     (`_MAX_LISTING_FOLLOW_UPS`), generic (works for any directory-
+     listing format, not one application's).
+
+  **Verified end to end against the real host** (not asserted from
+  code reading): `discover_hidden_paths('http://192.168.60.139/', ...,
+  extra_headers={'X-Forwarded-For': '192.168.60.1'})` now returns
+  `binary_references=[BinaryReference(url='.../vault/keykeeper',
+  content_type='application/octet-stream', ...)]` -- the exact binary
+  this session's manual investigation found, now discovered by the
+  pipeline itself with zero challenge-specific code. New
+  `tests/test_access_control_bypass_pipeline.py` reproduces the whole
+  chain against a local test server (not the real target) so it's
+  verified every run: the bypass probe finds the gated header
+  generically, a plain sweep with no header finds nothing (proving the
+  gating is real), and the gated sweep finds the binary through the
+  listing. New `tests/test_network_vulnerability_agent.py` cases cover
+  `check_unknown_service`'s three outcomes (flagged/observed/error)
+  directly, one of them using the real "Game Zone" banner text as its
+  fixture. Full suite: **522 passed, 4 skipped**.
+
+  **What is still NOT fixed, stated plainly**: recovering the actual
+  passkey from the binary still needs full Ghidra analysis (the raw-
+  string-only fallback cannot derive an XOR-keyed credential -- this
+  session's own manual reversal used `objdump`/`readelf` by hand,
+  outside the pipeline entirely, because Ghidra isn't installed in
+  this environment); and completing the console's own multi-step
+  protocol (AUTH -> WHOAMI -> compute a CRC -> PIDREQ) still has no
+  automated agent at all -- `execute_authorised_credential_access`
+  only ever makes ONE AUTH attempt and is never called automatically,
+  by design. Both are real, separate gaps from the three fixed here.

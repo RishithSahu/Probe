@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Iterable
 from urllib.parse import parse_qs, urlsplit
 
+from app.agents.web_security.content_discovery import AccessControlBypassHit
 from app.agents.web_security.crawler import DiscoveredEndpoint
 from app.agents.web_security.fingerprint import FingerprintResult
 from app.agents.web_security.zap_integration import ZapAlert
@@ -277,4 +278,45 @@ def findings_from_discovered_endpoints(
                     detection_method="katana_synthetic_fixture" if used_fixture else "katana_endpoint_param_heuristic",
                 )
             )
+    return findings, evidence
+
+
+def findings_from_access_control_bypass_hits(
+    hits: Iterable[AccessControlBypassHit], *, assessment_id: str, asset_id: str, base_url: str,
+) -> tuple[list[Finding], list[Evidence]]:
+    """A hit from content_discovery.discover_via_trusted_proxy_headers means this origin's own response
+    changed when a client-controllable header (X-Forwarded-For and similar) carried a value generically
+    associated with a trusted/internal source -- evidence that access control here is driven by a
+    spoofable header rather than enforced server-side against the real connection. One finding per
+    distinct header, medium severity (never auto-confirmed -- a differing response proves the header
+    changed something, not by itself that the revealed content is sensitive)."""
+    findings: list[Finding] = []
+    evidence: list[Evidence] = []
+    for hit in hits:
+        finding_id = _new_id("WEB")
+        evidence_id = _new_id("EVIDENCE")
+        evidence.append(Evidence(
+            evidence_id=evidence_id, finding_id=finding_id, evidence_type="access_control_bypass_probe",
+            source_tool="content_discovery", description=f"Response to {base_url} changed when {hit.header} was set",
+            raw_data={"header": hit.header, "value": hit.value, "status_code": hit.status_code,
+                     "content_length": hit.content_length},
+        ))
+        findings.append(Finding(
+            finding_id=finding_id, assessment_id=assessment_id, agent_id=AgentId.WEB_SECURITY,
+            surface=Surface.WEB, asset_id=asset_id, affected_url=base_url,
+            title=f"Access control appears to trust the client-supplied '{hit.header}' header",
+            description=(
+                f"The response from {base_url} changed (status/redirect/content-length) when this request "
+                f"carried {hit.header}: {hit.value!r} compared to the same request with no such header. "
+                "This suggests the origin trusts a client-controllable header to decide what to serve, "
+                "rather than enforcing access control against the real network connection -- a classic "
+                "IP-allowlist bypass. This does not by itself prove the revealed content is sensitive; "
+                "manual review of what actually changed is required."
+            ),
+            severity=Severity.MEDIUM, confidence=Confidence.LOW, evidence_refs=[evidence_id],
+            remediation="Enforce access control against the actual connecting address (or a cryptographically "
+            "verified identity), never a client-settable header such as X-Forwarded-For, unless it is "
+            "stripped and re-set only by a trusted, directly-adjacent reverse proxy.",
+            ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS, detection_method="trusted_proxy_header_bypass_probe",
+        ))
     return findings, evidence

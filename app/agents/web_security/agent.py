@@ -11,11 +11,13 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.adapters.authorisation_grants import headers_for_url
-from app.agents.web_security.content_discovery import discover_hidden_paths
+from app.agents.web_security.content_discovery import discover_hidden_paths, discover_via_trusted_proxy_headers
 from app.agents.web_security.crawler import crawl
 from app.agents.web_security.findings import (
+    findings_from_access_control_bypass_hits,
     findings_from_discovered_endpoints,
     findings_from_fingerprint,
     findings_from_zap_alerts,
@@ -179,6 +181,57 @@ def assess_target(
             } for ref in discovery.binary_references)
         except (ScopeViolationError, ToolExecutionError) as exc:
             errors.append(f"content_discovery({target.url}): {exc}")
+
+        # Stage E.5: generic access-control-bypass probe (item: "fundamental issue" fix) -- a plain
+        # wordlist sweep of the root origin can miss content that only ever appears once a specific
+        # client-controllable header is set (an IP-allowlist bypass), exactly the case confirmed on a real
+        # lab host this session: a hidden area was reachable only with a trusted-proxy-style header set,
+        # and the normal content-discovery sweep above (no such header) found nothing there at all.
+        try:
+            bypass = discover_via_trusted_proxy_headers(
+                target.url, asset_id=target.asset_id,
+                asset_ip=urlsplit(target.url).hostname, scope_guard=scope_guard,
+                rate_per_second=policy.content_discovery_rate_per_second,
+            )
+            tool_executions.append({
+                "tool": "access_control_bypass_probe", "target": target.url,
+                "requests_made": bypass.requests_made, "hits": len(bypass.hits),
+            })
+            errors.extend(f"access_control_bypass_probe({target.url}): {e}" for e in bypass.errors)
+            bypass_findings, bypass_evidence = findings_from_access_control_bypass_hits(
+                bypass.hits, assessment_id=assessment_id, asset_id=target.asset_id, base_url=target.url,
+            )
+            findings.extend(bypass_findings)
+            evidence.extend(bypass_evidence)
+            # Act on the FIRST winning header/value: re-run the same bounded content-discovery sweep, this
+            # time with that header set, so content gated behind it (like the real lab host's own hidden
+            # area) is actually found, not just flagged as "something changed here." One re-sweep, not one
+            # per hit, to keep this bounded regardless of how many headers happen to trigger a difference.
+            if bypass.hits:
+                winner = bypass.hits[0]
+                try:
+                    gated_discovery = discover_hidden_paths(
+                        target.url, asset_id=target.asset_id, scope_guard=scope_guard,
+                        max_requests=policy.max_content_discovery_requests,
+                        rate_per_second=policy.content_discovery_rate_per_second,
+                        extra_headers={winner.header: winner.value},
+                    )
+                    tool_executions.append({
+                        "tool": "content_discovery", "target": target.url,
+                        "under_header": f"{winner.header}={winner.value}",
+                        "requests_made": gated_discovery.requests_made, "hits": len(gated_discovery.hits),
+                        "binary_references": len(gated_discovery.binary_references),
+                    })
+                    errors.extend(f"content_discovery({target.url}, {winner.header}={winner.value}): {e}"
+                                 for e in gated_discovery.errors)
+                    binary_references.extend({
+                        "asset_id": ref.asset_id, "url": ref.url, "content_type": ref.content_type,
+                        "content_length": ref.content_length, "reason": ref.reason,
+                    } for ref in gated_discovery.binary_references)
+                except (ScopeViolationError, ToolExecutionError) as exc:
+                    errors.append(f"content_discovery({target.url}, under bypass header): {exc}")
+        except (ScopeViolationError, ToolExecutionError) as exc:
+            errors.append(f"access_control_bypass_probe({target.url}): {exc}")
 
     return findings, evidence, endpoints, tool_executions, errors, binary_references
 
