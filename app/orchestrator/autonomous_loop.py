@@ -74,16 +74,19 @@ def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task
         execution_method=f"{EXECUTION_METHOD} -> (scheduler selection)",
         input_data={"asset_id": objective.asset_id, "service_id": objective.service_id,
                    "finding_count_at_dispatch": objective.backing_findings_count,
+                   "finding_ids_at_dispatch": objective.finding_ids_at_dispatch,
                    "attempt_count": objective.next_attempt_count},
         output_data={"selection": explanation},
         status=TaskStatus.RUNNING, started_at=_now(), task_fingerprint=task_fingerprint,
     )
-    # allow_reclaim=True only when the candidate's OWN generation already positively decided this is a
-    # retry (next_attempt_count > 1 means generate_candidates saw a prior, finished attempt and a reason
-    # to try again) -- never just because this caller's own snapshot happens not to know about one. See
-    # try_reserve_task's own docstring for the race this prevents.
+    # allow_reclaim is a plain DB fact -- a task row for this candidate already exists -- never derived
+    # from the scheduler's own novelty/"is this fresh" judgement (objective.next_attempt_count). A stable,
+    # repeatable finding used to be scored as "fresh" (next_attempt_count=1) on every single read, which
+    # made this line refuse to reclaim an existing row forever even though nothing was actually running --
+    # see the long comment in scheduler.generate_candidates() for the full incident. See
+    # try_reserve_task's own docstring for the race this guards against.
     with session_scope() as db:
-        token = repository.try_reserve_task(db, task, allow_reclaim=objective.next_attempt_count > 1)
+        token = repository.try_reserve_task(db, task, allow_reclaim=objective.has_prior_attempt)
         if token:
             repository.log_event(
                 db, assessment_id, AgentId.ORCHESTRATOR.value,

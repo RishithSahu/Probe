@@ -35,54 +35,58 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _start_probe_and_discover(scope: str, assessment_id: str, *, port: int, probe_minutes: float) -> NetworkGraph:
-    """Starts Probe itself (python -m probe run), under this orchestrator's control, against exactly the
-    authorised scope, and reads back its real discovery as this assessment's initial NetworkGraph --
-    nothing here is a canned graph. Probe's own code (probe/cli.py::_ensure_privileges) asks Windows for
-    admin rights itself via a UAC prompt if this process is not already elevated; this function only
-    starts the process and waits for its API to come up, it never tries to grant itself privileges."""
-    from app.adapters.network_graph_adapter import ProbeAPISource, normalise_probe_graph
-    from probe.client import ProbeClient, ProbeError
+    """Import one supervised scan's atomic snapshot; reuse a matching snapshot.
 
-    data_dir = Path(settings.evidence_dir) / assessment_id / "probe-data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    # NOT --no-ui: Probe's own cli.py only starts uvicorn (its web view AND its API) when --no-ui is
-    # absent (probe/cli.py:345) -- passing --no-ui here left no API for ProbeClient.status() to ever poll,
-    # so this always timed out after 180s even though the scan itself completed normally underneath it.
-    cmd = [sys.executable, "-m", "probe", "run", "--scope", scope, "--port", str(port),
-          "--data-dir", str(data_dir), "--max-minutes", str(probe_minutes),
-          "--authorisations", str(REPO_ROOT / "authorisations.json")]
-    logger.info("starting Probe under orchestrator control: %s", " ".join(cmd))
-    subprocess.Popen(cmd, cwd=str(REPO_ROOT))
+    The managed parent must already have the required privileges. No API polling,
+    second scan request, detached elevation or imported historical task state.
+    """
+    from app.adapters.network_graph_adapter import normalise_probe_graph
+    from app.orchestrator.probe_supervisor import discover
 
-    base_url = f"http://127.0.0.1:{port}"
-    client = ProbeClient(base_url=base_url)
-    deadline = time.monotonic() + 180.0
-    while time.monotonic() < deadline:
-        try:
-            client.status()
-            break
-        except ProbeError:
-            time.sleep(2.0)
-    else:
-        raise SystemExit(
-            f"Probe's API never came up at {base_url} within 180s. If a Windows UAC elevation prompt "
-            "appeared, it must be approved for raw packet discovery to run; if it was declined or this "
-            "ran in a non-interactive context where no one could approve it, Probe could not start."
-        )
-    logger.info("Probe API is up at %s -- requesting a scan of %s", base_url, scope)
-    raw = ProbeAPISource(base_url=base_url, ensure_scan=True).load_raw()
-    return normalise_probe_graph(raw, scope_id=f"SCOPE-{scope.replace('/', '-')}", raw_source_ref=base_url)
+    directory = Path(settings.evidence_dir) / assessment_id / "probe-data"
+    snapshot = discover(root=REPO_ROOT, data_dir=directory, scope=scope, assessment_id=assessment_id,
+                        port=port, minutes=probe_minutes)
+    return normalise_probe_graph(snapshot["payload"], scope_id=f"SCOPE-{scope.replace('/', '-')}",
+                                 raw_source_ref=str(directory / "inventory-snapshot.json"))
 
 
 def _load_or_create(
     assessment_id: str, scope: str, network_graph_path: str | None, *, probe_port: int, probe_minutes: float,
 ) -> AssessmentPolicy:
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", assessment_id):
+        raise ValueError("Unsafe assessment identity")
     with session_scope() as db:
         try:
-            return repository.get_assessment_policy(db, assessment_id)
+            policy = repository.get_assessment_policy(db, assessment_id)
+            existing = repository.get_assessment(db, assessment_id)
+            if existing.scope_id != f"SCOPE-{scope.replace('/', '-')}":
+                raise ValueError("Resume scope does not match the original assessment")
+            if repository.load_network_graph(db, assessment_id) is None:
+                target = Path(settings.evidence_dir) / assessment_id / "probe-data" / "inventory-snapshot.json"
+                if not target.exists():
+                    raise RuntimeError("Assessment identity retained but inventory missing; recover existing artifacts before resume")
+                from probe.snapshot import read_snapshot
+                from app.adapters.network_graph_adapter import normalise_probe_graph
+                snapshot = read_snapshot(target, assessment_id=assessment_id, scope=[scope])
+                repository.store_network_graph(db, assessment_id, normalise_probe_graph(
+                    snapshot["payload"], scope_id=existing.scope_id, raw_source_ref=str(target)))
+            return policy
         except AppError:
             pass  # does not exist yet -- fall through to initialise it
 
+    policy = AssessmentPolicy(
+        allow_network_discovery=True, allow_network_service_assessment=True, allow_passive_web_analysis=True,
+        allow_web_crawling=True, allow_content_discovery=True, allow_binary_analysis=True,
+        allow_single_credential_verification=False, dry_run=False,
+    )
+    # Commit the identity before any discovery process can start. A failed import
+    # leaves a CREATED assessment and the complete Probe evidence for recovery.
+    with session_scope() as db:
+        repository.create_assessment(db, Assessment(
+            assessment_id=assessment_id, scope_id=f"SCOPE-{scope.replace('/', '-')}",
+            status=AssessmentStatus.CREATED, assessment_policy=policy,
+        ))
     if network_graph_path:
         graph = NetworkGraph.model_validate(json.loads(Path(network_graph_path).read_text()))
         logger.info("initialised %s (scope=%s) from supplied graph file %s", assessment_id, scope, network_graph_path)
@@ -91,16 +95,7 @@ def _load_or_create(
         logger.info("initialised %s (scope=%s) from Probe's own real discovery -- %d asset(s)",
                    assessment_id, scope, len(graph.assets))
 
-    policy = AssessmentPolicy(
-        allow_network_discovery=True, allow_network_service_assessment=True, allow_passive_web_analysis=True,
-        allow_web_crawling=True, allow_content_discovery=True, allow_binary_analysis=True,
-        allow_single_credential_verification=True, dry_run=False,
-    )
     with session_scope() as db:
-        repository.create_assessment(db, Assessment(
-            assessment_id=assessment_id, scope_id=graph.scope_id, status=AssessmentStatus.RUNNING,
-            assessment_policy=policy,
-        ))
         repository.store_network_graph(db, assessment_id, graph)
     return policy
 

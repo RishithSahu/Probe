@@ -1,40 +1,111 @@
 """Shared pytest fixtures: a local synthetic HTTP server (no external network
 access, no organisational targets) used by Web Agent tests, a loaded sample
 NetworkGraph, and a helper for standing up Probe's real FastAPI app for the
-Probe-integration test files."""
+Probe-integration test files.
+
+INCIDENT (2026-11-01): an earlier version of this file deleted `evidence/ape.db` -- the SAME path a real,
+live assessment uses -- at the start of every pytest session, to work around stale-schema failures after a
+migration landed. That autouse fixture ran AFTER `app.database.session` had already been imported (by the
+`from app.adapters...` import a few lines below, among others), and that module builds its SQLAlchemy
+engine from `settings.database_url` at MODULE IMPORT TIME -- so even monkeypatching `settings` inside a
+fixture body is too late to redirect it. The result: every test run shared, and could destroy, the one
+real production database. `ASSESSMENT-CREDENTIAL-ACCESS-397A` and its task/finding history were lost this
+way.
+
+The fix has two independent layers, so one of them failing cannot repeat the incident:
+  1. Below, BEFORE any `app.*` import (the actual bug): every writable path pytest's own config/session
+     code will ever touch is redirected into a fresh, unique temp root via environment variables, read by
+     app.core.config.Settings exactly like a real deployment's own env-based config -- no test-only branch
+     in application code, no "if running under pytest" special-casing there.
+  2. app/database/session.py itself now refuses, at import time, to bind to the real evidence/ape.db path
+     while pytest is the process running it (`"pytest" in sys.modules`) -- a second, independent guard in
+     case anything ever imports that module before this file's env vars are set.
+"""
 from __future__ import annotations
 
+import os
+import sys
+import tempfile
 import threading
 import time
+
+# ---------------------------------------------------------------------------------------------------------
+# MUST run before any `app.*` import anywhere in this file (or any test file pytest collects, since this
+# conftest.py is imported first). A unique root per pytest session AND per xdist worker (pytest-xdist sets
+# PYTEST_XDIST_WORKER before this file loads; its absence -- the normal, non-distributed case -- still
+# gets a fresh uuid4-suffixed root every run, never a fixed path two sessions could collide on).
+# ---------------------------------------------------------------------------------------------------------
+import uuid  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import pytest
+if "app.core.config" in sys.modules and not os.environ.get("APE_TEST_ROOT"):
+    raise RuntimeError("Application configuration was imported before pytest isolation; start a fresh test process")
 
-from app.adapters.network_graph_adapter import JSONFileNetworkGraphSource, load_network_graph
+_worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+_TEST_ROOT = Path(tempfile.gettempdir()) / "ape-pytest" / f"{_worker}-{uuid.uuid4().hex[:12]}"
+_TEST_ROOT.mkdir(parents=True, exist_ok=True)
+os.environ["APE_TEST_ROOT"] = str(_TEST_ROOT)
+os.environ["APE_ENVIRONMENT"] = "test"
+os.environ["APE_DATABASE_URL"] = f"sqlite:///{(_TEST_ROOT / 'ape-test.db').as_posix()}"
+os.environ["APE_EVIDENCE_DIR"] = str(_TEST_ROOT / "evidence")
+os.environ["APE_REPORTS_DIR"] = str(_TEST_ROOT / "evidence" / "reports")
+os.environ["APE_GHIDRA_PROJECT_DIR"] = str(_TEST_ROOT / "ghidra_projects")
+os.environ["APE_INPUTS_DIR"] = str(_TEST_ROOT / "inputs")
+os.environ["APE_NETWORK_GRAPH_DIR"] = str(_TEST_ROOT / "inputs" / "network_graphs")
+os.environ["APE_BINARIES_DIR"] = str(_TEST_ROOT / "inputs" / "binaries")
+
+import pytest  # noqa: E402
+
+from app.adapters.network_graph_adapter import JSONFileNetworkGraphSource, load_network_graph  # noqa: E402
+from app.core.config import settings  # noqa: E402
 
 FIXTURE_GRAPH = Path(__file__).parent / "fixtures" / "network_graphs" / "sample_graph.json"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _fresh_local_test_database():
-    """app/database/session.py's engine binds to settings.database_url ONCE at import time, before any
-    test's own monkeypatch of settings.evidence_dir can take effect -- so every test that uses
-    session_scope()/init_db() actually shares this one real, gitignored evidence/ape.db file, not a fresh
-    per-test database. A schema migration added via Base.metadata.create_all's own ALTER-TABLE-on-missing-
-    column path (e.g. a new nullable column on an existing table) never retroactively applies to a file
-    that already has that table, so a stale local copy left over from a previous run can fail every test
-    with "table X has no column named Y" the moment a new migration lands -- this has happened three times
-    in this project's history already (see docs/PROGRESS.md entries 7, 9, 11). Deleting it once at the
-    start of the session (never mid-session, so nothing here races a running test) makes every run start
-    from the current schema, exactly like a CI runner with no prior state would."""
-    from app.core.config import settings
-    if settings.database_url.startswith("sqlite:///"):
-        db_path = Path(settings.database_url.removeprefix("sqlite:///"))
-        if not db_path.is_absolute():
-            db_path = Path.cwd() / db_path
-        db_path.unlink(missing_ok=True)
-    yield
+def assert_database_url_is_safe() -> None:
+    """A plain assertion helper imported and run by tests/test_db_isolation.py, kept here so it executes
+    against the SAME `settings` object this conftest's own env vars configured, rather than re-deriving
+    the check from scratch."""
+    from app.database.safety import assert_test_database
+    assert_test_database(settings.database_url)
+    for path in (settings.evidence_dir, settings.reports_dir, settings.inputs_dir,
+                 settings.binaries_dir, settings.network_graph_dir, settings.ghidra_project_dir):
+        assert path.resolve().is_relative_to(_TEST_ROOT.resolve())
+
+
+assert_database_url_is_safe()
+
+
+def pytest_configure(config):
+    # tmp_path outputs must share this invocation's private data boundary too.
+    config.option.basetemp = str(_TEST_ROOT / "pytest")
+
+
+def _production_fingerprint():
+    import hashlib
+    original = Path(__file__).resolve().parents[1] / "evidence"
+    result = {}
+    if original.exists():
+        for path in original.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                with path.open("rb") as stream:
+                    result[str(path)] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return result
+
+
+def pytest_sessionstart(session):
+    assert_database_url_is_safe()
+    session._production_evidence_before = _production_fingerprint()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _production_fingerprint() != session._production_evidence_before:
+        session.exitstatus = 1
+        print("INCIDENT: original evidence changed during tests; stop and preserve artifacts")
+        return
+    from app.database.safety import remove_test_workspace
+    remove_test_workspace(_TEST_ROOT)
 
 
 def start_probe_test_server(app) -> tuple:

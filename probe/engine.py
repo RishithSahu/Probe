@@ -1376,6 +1376,10 @@ class Engine:
             self._status("done")
             if self.on_done:
                 self.on_done(self)
+        except BaseException as exc:
+            self.store.finish_scan(self._scan_id, "failed", {"error_type": type(exc).__name__,
+                                                           "inventory_retained": True})
+            raise
         finally:
             self._status()
             t.stop()

@@ -4,6 +4,7 @@ Evidence schema. As with the Web Agent, nothing here marks a finding
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 from app.agents.binary_analysis.static_analysis import Weakness
@@ -23,6 +24,16 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 
+def _stable_finding_id(*parts: str) -> str:
+    """Deterministic, content-addressed finding_id -- same fix, same reason as
+    app.agents.network_vulnerability.findings._stable_finding_id and app.agents.web_security.findings.
+    _stable_finding_id: re-analysing the same binary must update the existing Finding row, not mint a
+    fresh uuid4()-based duplicate every time."""
+    fingerprint = ":".join(str(p) for p in parts)
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:10]
+    return f"BIN-{digest}"
+
+
 def findings_from_weaknesses(
     weaknesses: list[Weakness],
     *,
@@ -33,7 +44,9 @@ def findings_from_weaknesses(
     findings: list[Finding] = []
     evidence: list[Evidence] = []
     for w in weaknesses:
-        finding_id = _new_id("BIN")
+        finding_id = _stable_finding_id(
+            assessment_id, binary_id, w.category, w.function_name or "", w.function_address or "", w.matched_value or "",
+        )
         evidence_id = _new_id("EVIDENCE")
         evidence.append(
             Evidence(

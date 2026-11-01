@@ -51,7 +51,8 @@ class ScanBody(BaseModel):
 
 
 def create_app(store: Store, scope: ScopeGuard | None = None,
-               request_scan: Callable[[bool, float], dict] | None = None, orchestrator=None) -> FastAPI:
+               request_scan: Callable[[bool, float], dict] | None = None, orchestrator=None,
+               dashboard: bool = True) -> FastAPI:
     app = FastAPI(title="Probe", docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
     svc = ProbeService(store, scope)
     from ..orchestrator import Orchestrator
@@ -59,6 +60,8 @@ def create_app(store: Store, scope: ScopeGuard | None = None,
 
     @app.get("/")
     def index():
+        if not dashboard:
+            raise HTTPException(404, "Dashboard disabled; API remains available")
         return FileResponse(STATIC / "index.html")
 
     @app.get("/api/state")                 # the web view

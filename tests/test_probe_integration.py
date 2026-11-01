@@ -32,7 +32,8 @@ def _seed_store(store: Store) -> None:
     # target.
     store.upsert_host("10.20.30.10", mac="aa:bb:cc:dd:ee:01")
     store.update_host("10.20.30.10", verdict="CONFIRMED_ONLINK", roles=["forwarder"])
-    store.upsert_service("10.20.30.10", 8080, service="http", product="Apache httpd", version="2.4.68")
+    store.upsert_service("10.20.30.10", 8080, service="http", product="Apache httpd", version="2.4.68",
+                         scripts={"probe-http-metadata": {"resources": [{"path": "/"}]}})
     store.upsert_service("10.20.30.10", 22, service="ssh")
 
     # HOST-B: held (inside a hidden segment pending approval) — must never
@@ -85,6 +86,8 @@ def test_probe_api_source_loads_real_endpoints(probe_server):
     http_service = next(s for s in host_a.services if s.service_name == "http")
     assert http_service.product == "Apache httpd"
     assert http_service.version == "2.4.68"
+    assert http_service.probe_observations["probe-http-metadata"]["resources"][0]["path"] == "/"
+    assert host_a.probe_roles == ["forwarder"]
 
 
 def test_probe_api_source_derives_edges_from_via(probe_server):
