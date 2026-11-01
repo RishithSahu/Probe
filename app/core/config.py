@@ -46,7 +46,12 @@ class Settings(BaseSettings):
 
     # --- Web Security Agent tool integrations ---------------------------------
     katana_binary: str = Field(default="katana")
-    zap_api_url: str = Field(default="http://127.0.0.1:8080")
+    # NOT 8080: that's probe_api_url's default below. A local, non-Docker dev run with both services
+    # pointed at their own defaults would have every ZAP call silently hit Probe's API instead (a 404,
+    # indistinguishable from "ZAP unreachable" other than by reading the response body), falling back to
+    # the synthetic fixture on every single call -- found live, this is the fix. Docker Compose is
+    # unaffected: it sets APE_ZAP_API_URL to http://zap:8080 explicitly, a different hostname.
+    zap_api_url: str = Field(default="http://127.0.0.1:8090")
     zap_api_key: str = Field(default="")
     httpx_timeout_seconds: float = Field(default=10.0)
     web_agent_use_fixtures: bool = Field(

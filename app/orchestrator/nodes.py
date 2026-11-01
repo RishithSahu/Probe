@@ -49,6 +49,7 @@ from app.database import repository
 from app.database.session import session_scope
 from app.orchestrator.dispatcher import run_concurrently
 from app.orchestrator.state import OrchestratorState
+from app.orchestrator.task_ids import make_task_id
 
 logger = logging.getLogger("ape.orchestrator")
 
@@ -197,11 +198,11 @@ def create_agent_tasks(state: OrchestratorState) -> dict:
             (AgentId.NETWORK_VULNERABILITY, "external_ingestion", {}),
             (AgentId.NETWORK_VULNERABILITY_DETECTIVE, "network_service_assessment", {}),
         ):
-            task_id = f"TASK-{agent_id.value}-{assessment_id}"
+            task_id, fingerprint = make_task_id(agent_id.value, assessment_id)
             repository.upsert_agent_task(
                 db,
                 AgentTask(task_id=task_id, assessment_id=assessment_id, agent_id=agent_id, task_type=task_type,
-                          input_data=input_data, status=TaskStatus.PENDING),
+                          input_data=input_data, status=TaskStatus.PENDING, task_fingerprint=fingerprint),
             )
             task_status[agent_id.value] = {"status": TaskStatus.PENDING.value, "error": None}
 
@@ -238,12 +239,12 @@ def _mark_task(assessment_id: str, agent_id: AgentId, status: TaskStatus, *, err
     from app.core.schemas import AgentTask
 
     with session_scope() as db:
-        task_id = f"TASK-{agent_id.value}-{assessment_id}"
+        task_id, fingerprint = make_task_id(agent_id.value, assessment_id)
         repository.upsert_agent_task(
             db,
             AgentTask(
                 task_id=task_id, assessment_id=assessment_id, agent_id=agent_id, task_type="",
-                status=status, error_message=error,
+                status=status, error_message=error, task_fingerprint=fingerprint,
                 started_at=_now() if status == TaskStatus.RUNNING else None,
                 completed_at=_now() if status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.SKIPPED) else None,
             ),
@@ -460,7 +461,7 @@ def process_discovered_binary_references(
 
     for i, ref in enumerate(references):
         asset_id, url = ref["asset_id"], ref["url"]
-        task_id = f"TASK-{AgentId.BINARY_ANALYSIS.value}-discovered-{assessment_id}-{i}"
+        task_id, fingerprint = make_task_id(AgentId.BINARY_ANALYSIS.value, "discovered", assessment_id, url, str(i))
         input_data = {"source_url": url, "asset_id": asset_id, "reason": ref.get("reason")}
 
         def _task(status: TaskStatus, *, error: str | None = None, started: bool = False) -> None:
@@ -471,6 +472,7 @@ def process_discovered_binary_references(
                     error_message=error, started_at=_now() if started else None,
                     completed_at=_now() if status in (TaskStatus.COMPLETED, TaskStatus.FAILED) else None,
                     parent_task_id=parent_task_id, initiated_by=initiated_by, execution_method=execution_method,
+                    task_fingerprint=fingerprint,
                 ))
 
         _task(TaskStatus.RUNNING, started=True)
@@ -522,7 +524,7 @@ def process_discovered_binary_references(
         # a credential never grants permission to use it (point D.5). Nothing published here (task, event,
         # finding, evidence) carries the value itself, only the protected-storage reference.
         for rc in analysis.recovered_credentials:
-            access_task_id = f"TASK-authorised_credential_access-{assessment_id}-{rc['credential_ref']}"
+            access_task_id, access_fingerprint = make_task_id("authorised_credential_access", assessment_id, rc["credential_ref"])
             with session_scope() as db:
                 repository.upsert_agent_task(db, AgentTask(
                     task_id=access_task_id, assessment_id=assessment_id, agent_id=AgentId.BINARY_ANALYSIS,
@@ -531,7 +533,7 @@ def process_discovered_binary_references(
                                "source_url": url, "function_name": rc["function_name"],
                                "confidence": rc["confidence"]},
                     status=TaskStatus.BLOCKED, parent_task_id=task_id, initiated_by=initiated_by,
-                    execution_method=execution_method,
+                    execution_method=execution_method, task_fingerprint=access_fingerprint,
                 ))
                 repository.log_event(
                     db, assessment_id, AgentId.BINARY_ANALYSIS.value,
@@ -597,7 +599,7 @@ def execute_authorised_credential_access(
     from app.core.protected_storage import get_provenance, retrieve_secret
     from app.core.schemas import AgentTask
 
-    access_task_id = f"TASK-authorised_credential_access-{assessment_id}-{credential_ref}"
+    access_task_id, access_fingerprint = make_task_id("authorised_credential_access", assessment_id, credential_ref)
     provenance = get_provenance(credential_ref)
 
     with session_scope() as db:
@@ -606,7 +608,7 @@ def execute_authorised_credential_access(
             task_type="authorised_credential_access",
             input_data={"credential_ref": credential_ref, "service_id": service_id, "asset_id": asset_id,
                        "source_binary_sha256": provenance.get("source_binary_sha256")},
-            status=TaskStatus.RUNNING, started_at=_now(),
+            status=TaskStatus.RUNNING, started_at=_now(), task_fingerprint=access_fingerprint,
         ))
         repository.log_event(
             db, assessment_id, AgentId.HIDDEN_SERVICES_DETECTIVE.value,
@@ -650,7 +652,7 @@ def execute_authorised_credential_access(
             input_data={"credential_ref": credential_ref, "service_id": service_id, "asset_id": asset_id},
             output_data={"outcome": auth_result.outcome},
             status=TaskStatus.COMPLETED if auth_result.outcome != "error" else TaskStatus.FAILED,
-            error_message=auth_result.error, completed_at=_now(),
+            error_message=auth_result.error, completed_at=_now(), task_fingerprint=access_fingerprint,
         ))
         repository.store_findings(db, [finding], [evidence])
         for record in guard.audit_log:
@@ -765,7 +767,10 @@ def build_attack_paths(state: OrchestratorState) -> dict:
 
 def map_ptes_phases(state: OrchestratorState) -> dict:
     tool_executions: list[dict] = []
-    for result in (state.get("web_agent_result"), state.get("binary_agent_result"), state.get("network_vulnerability_result")):
+    for result in (
+        state.get("web_agent_result"), state.get("binary_agent_result"),
+        state.get("network_vulnerability_result"), state.get("triggered_binary_agent_result"),
+    ):
         if result is not None:
             tool_executions.extend(result.tool_executions)
 
@@ -794,35 +799,44 @@ def generate_report(state: OrchestratorState) -> dict:
 
 
 def complete_assessment(state: OrchestratorState) -> dict:
-    """Determines the final AssessmentStatus from each specialist task's
-    actual recorded TaskStatus (persisted by `_mark_task` throughout this
-    run) — NOT from `OrchestratorState.errors`.
+    """Determines the final AssessmentStatus from every task's actual recorded TaskStatus (persisted
+    throughout this run) — NOT from `OrchestratorState.errors`, which also accumulates benign diagnostic
+    notes that are not failures (see the original bug this replaced).
 
-    `errors` previously drove this decision directly, which was a bug: that
-    list also accumulates benign diagnostic notes (e.g. validate_scope's
-    "a permission is enabled but there's nothing in the graph to use it
-    on") that are not failures. A run where every attempted task actually
-    completed, but validate_scope merely noted a configuration mismatch,
-    was incorrectly reported as `partially_completed`. SKIPPED tasks
-    (not authorised, or nothing to do) don't count as failures either —
-    only COMPLETED vs FAILED among tasks that were actually attempted.
+    Fixed bug: the previous version only counted COMPLETED/FAILED as "attempted" -- a PARTIAL task (real
+    findings alongside a real stage error) contributed to NEITHER bucket, so a run where every single task
+    ended PARTIAL (or every task was SKIPPED/PENDING/BLOCKED, i.e. nothing ever actually ran) fell through
+    to the `else` branch and was reported COMPLETED. An assessment is never COMPLETED just because the
+    queue emptied out; it must have genuinely finished, uniformly-successful work to attempt in the first
+    place.
     """
     assessment_id = state["assessment_id"]
 
     with session_scope() as db:
         tasks = repository.list_agent_tasks(db, assessment_id)
-        attempted = [t for t in tasks if t.status in (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)]
-        failed = [t for t in attempted if t.status == TaskStatus.FAILED.value]
+        completed = [t for t in tasks if t.status == TaskStatus.COMPLETED.value]
+        failed = [t for t in tasks if t.status == TaskStatus.FAILED.value]
+        partial = [t for t in tasks if t.status == TaskStatus.PARTIAL.value]
+        blocked = [t for t in tasks if t.status == TaskStatus.BLOCKED.value]
+        attempted = completed + failed + partial  # genuinely ran to some conclusion, success or not
 
-        if attempted and len(failed) == len(attempted):
+        if not attempted:
+            # Nothing ever actually ran -- SKIPPED/PENDING/BLOCKED only. A BLOCKED dependency (e.g. Log
+            # Monitor's missing credential) that nothing else resolved is reported as such, not COMPLETED.
+            final_status = AssessmentStatus.BLOCKED if blocked else AssessmentStatus.INCOMPLETE
+        elif len(failed) == len(attempted):
             final_status = AssessmentStatus.FAILED
-        elif failed:
+        elif failed or partial or blocked:
             final_status = AssessmentStatus.PARTIALLY_COMPLETED
         else:
             final_status = AssessmentStatus.COMPLETED
 
         repository.update_assessment_status(db, assessment_id, final_status, completed_at=_now())
-        repository.log_event(db, assessment_id, AgentId.ORCHESTRATOR.value,
-                              f"assessment complete: status={final_status.value}")
+        repository.log_event(
+            db, assessment_id, AgentId.ORCHESTRATOR.value,
+            f"assessment complete: status={final_status.value} "
+            f"(completed={len(completed)} failed={len(failed)} partial={len(partial)} blocked={len(blocked)} "
+            f"total_tasks={len(tasks)})",
+        )
 
     return {"assessment_status": final_status.value}

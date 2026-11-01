@@ -10,7 +10,9 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import AssessmentNotFoundError
+from datetime import datetime, timezone
+
+from app.core.exceptions import AppError, AssessmentNotFoundError
 from app.core.schemas import (
     AgentTask,
     Assessment,
@@ -128,6 +130,7 @@ def upsert_agent_task(db: Session, task: AgentTask) -> None:
     record.execution_method = task.execution_method
     record.evidence_ids = task.evidence_ids
     record.verification_status = task.verification_status
+    record.task_fingerprint = task.task_fingerprint
     db.flush()
 
 
@@ -156,7 +159,7 @@ def try_reserve_task(db: Session, task: AgentTask) -> bool:
         task_type=task.task_type, input_data=task.input_data, status=task.status.value,
         output_data=task.output_data, parent_task_id=task.parent_task_id, initiated_by=task.initiated_by,
         execution_method=task.execution_method, started_at=task.started_at,
-        verification_status=task.verification_status,
+        verification_status=task.verification_status, task_fingerprint=task.task_fingerprint,
     )
     db.add(record)
     try:
@@ -172,7 +175,7 @@ def try_reserve_task(db: Session, task: AgentTask) -> bool:
                 input_data=task.input_data, status=task.status.value, output_data=None, error_message=None,
                 started_at=task.started_at, completed_at=None, parent_task_id=task.parent_task_id,
                 initiated_by=task.initiated_by, execution_method=task.execution_method,
-                evidence_ids=None, verification_status=None,
+                evidence_ids=None, verification_status=None, task_fingerprint=task.task_fingerprint,
             )
         )
         db.flush()
@@ -214,6 +217,12 @@ def store_findings(db: Session, findings: list[Finding], evidence: list[Evidence
         record.function_address = f.function_address
         record.verification_required = f.verification_required
         record.created_at = f.created_at
+        record.verification_state = f.verification_state
+        record.verified_at = f.verified_at
+        record.verifier = f.verifier
+        record.verification_evidence_refs = f.verification_evidence_refs or None
+        record.verification_explanation = f.verification_explanation
+        record.evidence_integrity_hash = f.evidence_integrity_hash
     db.flush()
 
     for e in evidence:
@@ -269,8 +278,36 @@ def finding_to_schema(record: FindingRecord) -> Finding:
             "function_address": record.function_address,
             "verification_required": record.verification_required,
             "created_at": record.created_at,
+            "verification_state": record.verification_state,
+            "verified_at": record.verified_at,
+            "verifier": record.verifier,
+            "verification_evidence_refs": record.verification_evidence_refs or [],
+            "verification_explanation": record.verification_explanation,
+            "evidence_integrity_hash": record.evidence_integrity_hash,
         }
     )
+
+
+def update_finding_verification(
+    db: Session, finding_id: str, *, verification_state: str, verifier: str,
+    verification_evidence_refs: list[str] | None = None, verification_explanation: str | None = None,
+    evidence_integrity_hash: str | None = None, verified_at=None,
+) -> None:
+    """Sets the per-finding verification outcome (item 7) -- deliberately separate from
+    `update_finding_status`, which changes `status` (suspected/confirmed/rejected). A finding can be
+    `verification_state='inconclusive'` while `status` stays `suspected`, or vice versa; these are two
+    different questions ("is this evidence sound?" vs "do we believe the weakness is real?") and neither
+    implies the other."""
+    record = db.get(FindingRecord, finding_id)
+    if record is None:
+        raise AppError(f"finding {finding_id!r} not found")
+    record.verification_state = verification_state
+    record.verifier = verifier
+    record.verification_evidence_refs = verification_evidence_refs or None
+    record.verification_explanation = verification_explanation
+    record.evidence_integrity_hash = evidence_integrity_hash
+    record.verified_at = verified_at or datetime.now(timezone.utc)
+    db.flush()
 
 
 # --- Attack paths ---------------------------------------------------------------

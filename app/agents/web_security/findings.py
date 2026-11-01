@@ -9,7 +9,7 @@ same policy applies across all three surfaces.
 from __future__ import annotations
 
 import uuid
-from typing import Iterable
+from collections.abc import Iterable
 from urllib.parse import parse_qs, urlsplit
 
 from app.agents.web_security.crawler import DiscoveredEndpoint
@@ -68,11 +68,12 @@ def findings_from_fingerprint(
     findings: list[Finding] = []
     evidence: list[Evidence] = []
 
-    if result.error:
+    if result.error or result.status_code is None:
         return findings, evidence
 
     present_lower = {h.lower() for h in result.headers}
-    missing = [h for h in MISSING_SECURITY_HEADERS if h not in present_lower]
+    missing = [h for h in MISSING_SECURITY_HEADERS if h not in present_lower
+               and (h != "strict-transport-security" or urlsplit(result.final_url).scheme == "https")]
     if missing:
         finding_id = _new_id("WEB")
         evidence_id = _new_id("EVIDENCE")
@@ -83,7 +84,8 @@ def findings_from_fingerprint(
                 evidence_type="http_response",
                 source_tool="httpx",
                 description=f"Response headers observed for {result.final_url}",
-                raw_data={"headers": result.headers, "missing": missing},
+                raw_data={"headers": result.headers, "missing": missing,
+                          "url": result.final_url, "status_code": result.status_code},
             )
         )
         findings.append(
@@ -124,7 +126,7 @@ def findings_from_fingerprint(
                     evidence_type="http_response",
                     source_tool="httpx",
                     description=f"Cookie {cookie.get('name')!r} observed on {result.final_url}",
-                    raw_data=cookie,
+                    raw_data={**cookie, "url": result.final_url, "status_code": result.status_code},
                 )
             )
             findings.append(
@@ -150,11 +152,17 @@ def findings_from_fingerprint(
 
 
 def findings_from_zap_alerts(
-    alerts: Iterable[ZapAlert], *, assessment_id: str, asset_id: str
+    alerts: Iterable[ZapAlert], *, assessment_id: str, asset_id: str, used_fixture: bool = False,
 ) -> tuple[list[Finding], list[Evidence]]:
     """Every ZAP alert is suspected until independently validated — a scanner
     alert is signal, not proof. Active-rule alerts are still `suspected`:
-    ZAP's own confidence rating informs `confidence`, not `status`."""
+    ZAP's own confidence rating informs `confidence`, not `status`.
+
+    `used_fixture` must be the SAME value `ZapScanResult.used_fixture` carried for these exact alerts: when
+    true, ZAP was unreachable and these are the documented synthetic stand-in alerts
+    (zap_integration.py::_synthetic_alerts), not a real scan. The resulting Finding/Evidence are tagged
+    unmistakably as such (title prefix, detection_method suffix, capped confidence) -- a fixture must never
+    be stored indistinguishably from a real finding."""
     findings: list[Finding] = []
     evidence: list[Evidence] = []
     for alert in alerts:
@@ -164,14 +172,17 @@ def findings_from_zap_alerts(
             Evidence(
                 evidence_id=evidence_id,
                 finding_id=finding_id,
-                evidence_type="zap_alert",
-                source_tool="owasp_zap",
-                description=f"ZAP alert {alert.plugin_id} ({alert.name}) on {alert.url}",
+                evidence_type="zap_alert" if not used_fixture else "zap_alert_synthetic_fixture",
+                source_tool="owasp_zap" if not used_fixture else "owasp_zap(unreachable; synthetic fixture)",
+                description=(f"ZAP alert {alert.plugin_id} ({alert.name}) on {alert.url}" if not used_fixture else
+                            f"ZAP was unreachable; this is the documented synthetic stand-in alert "
+                            f"{alert.plugin_id} ({alert.name}) for {alert.url}, NOT a real scan result"),
                 raw_data={
                     "plugin_id": alert.plugin_id,
                     "evidence": alert.evidence,
                     "cwe_id": alert.cwe_id,
                     "is_active_rule": alert.is_active_rule,
+                    "used_fixture": used_fixture,
                 },
             )
         )
@@ -184,21 +195,22 @@ def findings_from_zap_alerts(
                 asset_id=asset_id,
                 affected_url=alert.url,
                 parameter=alert.param,
-                title=alert.name,
+                title=alert.name if not used_fixture else f"[SYNTHETIC FIXTURE -- ZAP unreachable] {alert.name}",
                 description=alert.description or alert.name,
                 severity=_ZAP_RISK_TO_SEVERITY.get(alert.risk, Severity.INFO),
-                confidence=_ZAP_CONFIDENCE_TO_OURS.get(alert.confidence, Confidence.LOW),
+                confidence=Confidence.LOW if used_fixture else _ZAP_CONFIDENCE_TO_OURS.get(alert.confidence, Confidence.LOW),
                 evidence_refs=[evidence_id],
                 remediation=alert.solution or None,
                 ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS,
-                detection_method="zap_active_scan" if alert.is_active_rule else "zap_passive_scan",
+                detection_method=("zap_synthetic_fixture" if used_fixture else
+                                 ("zap_active_scan" if alert.is_active_rule else "zap_passive_scan")),
             )
         )
     return findings, evidence
 
 
 def findings_from_discovered_endpoints(
-    endpoints: Iterable[DiscoveredEndpoint], *, assessment_id: str, asset_id: str
+    endpoints: Iterable[DiscoveredEndpoint], *, assessment_id: str, asset_id: str, used_fixture: bool = False,
 ) -> tuple[list[Finding], list[Evidence]]:
     """Katana finds real endpoints a plain fingerprint of the root page never sees -- until now, that
     discovery fed only report metadata (`discovered_endpoints`) and never became a Finding, unlike Ghidra's
@@ -228,10 +240,13 @@ def findings_from_discovered_endpoints(
                 Evidence(
                     evidence_id=evidence_id,
                     finding_id=finding_id,
-                    evidence_type="discovered_endpoint",
-                    source_tool="katana",
-                    description=f"Endpoint discovered by Katana with a file-read-shaped parameter: {ep.url}",
-                    raw_data={"url": ep.url, "method": ep.method, "parameter": param},
+                    evidence_type="discovered_endpoint" if not used_fixture else "discovered_endpoint_synthetic_fixture",
+                    source_tool="katana" if not used_fixture else "katana(not installed; synthetic fixture)",
+                    description=(f"Endpoint discovered by Katana with a file-read-shaped parameter: {ep.url}"
+                                if not used_fixture else
+                                f"Katana was unavailable; this is the documented synthetic stand-in endpoint "
+                                f"{ep.url}, NOT a real crawl result"),
+                    raw_data={"url": ep.url, "method": ep.method, "parameter": param, "used_fixture": used_fixture},
                 )
             )
             findings.append(
@@ -243,7 +258,9 @@ def findings_from_discovered_endpoints(
                     asset_id=asset_id,
                     affected_url=ep.url,
                     parameter=param,
-                    title=f"Potential local file inclusion / path traversal parameter '{param}'",
+                    title=(f"Potential local file inclusion / path traversal parameter '{param}'" if not used_fixture
+                          else f"[SYNTHETIC FIXTURE -- Katana unavailable] Potential local file inclusion / "
+                               f"path traversal parameter '{param}'"),
                     description=(
                         f"The endpoint {base_url!r} was discovered with a query parameter named {param!r}, a "
                         "name generically associated with a server reading a file named by the request "
@@ -257,7 +274,7 @@ def findings_from_discovered_endpoints(
                     remediation="Review whether this parameter's value reaches a filesystem read, and if so, "
                     "validate it against an allow-list rather than passing it through unchecked.",
                     ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS,
-                    detection_method="katana_endpoint_param_heuristic",
+                    detection_method="katana_synthetic_fixture" if used_fixture else "katana_endpoint_param_heuristic",
                 )
             )
     return findings, evidence

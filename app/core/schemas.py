@@ -80,6 +80,12 @@ class AssessmentStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     PARTIALLY_COMPLETED = "partially_completed"
+    # Nothing was ever actually attempted (every task stayed PENDING/SKIPPED/BLOCKED) -- distinct from
+    # COMPLETED, which previously (bug) is what an empty-attempted-tasks run fell through to by default.
+    INCOMPLETE = "incomplete"
+    # At least one task is stuck on a dependency (e.g. a BLOCKED authorised_credential_access task, or a
+    # missing-prerequisite investigation like Log Monitor's HTTP Basic Auth) that nothing else resolves.
+    BLOCKED = "blocked"
 
 
 class AgentId(str, enum.Enum):
@@ -312,6 +318,32 @@ class Finding(BaseModel):
         default=True, description="True until evidence_validator has confirmed or rejected this finding."
     )
 
+    # -- per-finding verification outcome (item 7): a task-level status must never stand in for this. Three
+    # findings from one task can carry three different verification_state values -- the task only records
+    # that it ran and what agent/method produced it, never whether its findings turned out to be real. --
+    verification_state: str | None = Field(
+        default=None, description="None until checked; then one of 'verified', 'unverified', or "
+        "'inconclusive' -- set only by app.analysis.evidence_validator, never implied by the originating "
+        "agent's own task completing successfully."
+    )
+    verified_at: datetime | None = None
+    verifier: str | None = Field(
+        default=None, description="Identity/version of whatever ran the check, e.g. "
+        "'evidence_validator@auto_confirm' -- so a later change to the validation logic doesn't silently "
+        "get credited to an old verification."
+    )
+    verification_evidence_refs: list[str] = Field(
+        default_factory=list, description="Evidence this verification decision itself relied on -- may "
+        "overlap evidence_refs, but is not assumed identical (a verification can draw on evidence the "
+        "original finding did not cite, e.g. a corroborating finding on the same service)."
+    )
+    verification_explanation: str | None = None
+    evidence_integrity_hash: str | None = Field(
+        default=None, description="SHA-256 of the evidence this verification was computed against, when "
+        "that evidence is a stable byte sequence (e.g. a binary, a captured response) -- lets a later re-run "
+        "detect that the underlying evidence changed since this finding was verified."
+    )
+
     @model_validator(mode="after")
     def _at_most_one_target(self) -> "Finding":
         """A finding is about exactly one network asset OR one binary, never
@@ -363,6 +395,11 @@ class AgentTask(BaseModel):
     verification_status: str | None = Field(
         default=None, description="None until checked; then 'verified' or 'unverified' -- set by "
         "app.analysis.evidence_validator, never by the agent that produced the finding."
+    )
+    task_fingerprint: str | None = Field(
+        default=None, description="The full, readable '-'.join(parts) task_id was derived from (see "
+        "app.orchestrator.task_ids.make_task_id) -- task_id itself is a bounded hash so it always fits the "
+        "database column; this is what a human (or a dedup check) actually reads."
     )
 
 

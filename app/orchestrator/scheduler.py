@@ -124,7 +124,10 @@ def generate_candidates(
 
     findings_by_service: dict[str, list[Finding]] = {}
     for f in findings:
-        if f.service_id:
+        # A synthetic-fixture finding (ZAP/Katana unreachable -- see findings_from_zap_alerts/
+        # findings_from_discovered_endpoints) must never make the scheduler treat a service as
+        # evidence-backed; it is a documented stand-in, not real signal about that service.
+        if f.service_id and not (f.detection_method or "").endswith("_synthetic_fixture"):
             findings_by_service.setdefault(f.service_id, []).append(f)
 
     candidates: list[Candidate] = []
