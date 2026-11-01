@@ -87,3 +87,29 @@ def test_help_timeout_cannot_start_a_crawl(monkeypatch, tmp_path):
     with pytest.raises(ToolExecutionError, match="Could not verify"):
         crawler.crawl("http://example.test/", asset_id="HOST", scope_guard=guard(), depth=1, rate_per_second=1, output_dir=tmp_path)
     assert len(calls) == 1
+
+
+def test_real_subprocess_call_survives_non_cp1252_output(monkeypatch, tmp_path):
+    """Regression: found against a real live target, invisible with any fixture/synthetic test data.
+    text=True without an explicit encoding uses the platform default codec (cp1252 on Windows), which
+    raised UnicodeDecodeError the moment a real tool's real output contained an ordinary UTF-8 byte
+    sequence a fixture would never contain. This calls the REAL subprocess.run inside
+    _check_scope_capabilities (not a mock of it), against a real child process, to prove the actual
+    encoding= kwarg is in effect -- a mocked subprocess.run can't exercise this at all."""
+    import sys
+    import textwrap
+
+    fake_katana = tmp_path / "fake_katana.py"
+    fake_katana.write_text(textwrap.dedent("""
+        import sys
+        sys.stdout.buffer.write("-crawl-scope -disable-redirects \\u20ac".encode("utf-8"))
+    """))
+    monkeypatch.setattr(crawler.settings, "katana_binary", sys.executable)
+    original_run = crawler.subprocess.run
+
+    def run_via_python(args, **kwargs):
+        real_args = [sys.executable, str(fake_katana)] if args[1:] == ["-h"] else args
+        return original_run(real_args, **kwargs)
+
+    monkeypatch.setattr(crawler.subprocess, "run", run_via_python)
+    crawler._check_scope_capabilities()  # must not raise UnicodeDecodeError

@@ -64,7 +64,11 @@ def _sha256(path: Path) -> str:
 
 def _run_tool(args: list[str], timeout: float = 20.0) -> tuple[int, str, str]:
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        # text=True without an explicit encoding uses the platform default codec (cp1252 on Windows),
+        # which can raise UnicodeDecodeError on a real tool's real output -- see crawler.py's own fix for
+        # the same bug, found against a live target.
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False,
+                              encoding="utf-8", errors="replace")
         return proc.returncode, proc.stdout, proc.stderr
     except FileNotFoundError:
         return -1, "", f"{args[0]} not found on PATH"

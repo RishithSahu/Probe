@@ -91,7 +91,13 @@ def _run_chunk(nmap: str, ips: list[str], ports: list[int], host_timeout: int, b
     with fence.tool_context():
         try:
             _require_egress()
-            out = subprocess.run(args, capture_output=True, text=True, timeout=budget, creationflags=flags)
+            # text=True without an explicit encoding uses the platform default codec (cp1252 on Windows),
+            # which can raise UnicodeDecodeError the moment a real scanned service's banner contains a
+            # non-cp1252 byte -- found and fixed for the same reason in app/agents/web_security/crawler.py
+            # against a real live target; nmap's own XML/greppable output can carry arbitrary banner bytes
+            # too.
+            out = subprocess.run(args, capture_output=True, text=True, timeout=budget, creationflags=flags,
+                                 encoding="utf-8", errors="replace")
             err = out.stderr or ""
         except subprocess.TimeoutExpired:
             err = "timeout"
@@ -277,7 +283,8 @@ def _run_generic(nmap: str, args: list[str], host_timeout: int, budget: float, o
     with fence.tool_context():
         try:
             _require_egress()
-            completed = subprocess.run(full, capture_output=True, text=True, timeout=budget, creationflags=flags)
+            completed = subprocess.run(full, capture_output=True, text=True, timeout=budget, creationflags=flags,
+                                       encoding="utf-8", errors="replace")
             err = completed.stderr or ""
             if isinstance(completed.stdout, str):
                 Path(outfile + ".console.txt").write_text(completed.stdout, encoding="utf-8")

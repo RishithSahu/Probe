@@ -156,8 +156,12 @@ def run_ghidra_analysis(binary_path: str | Path, *, output_dir: Path) -> GhidraA
         "-deleteProject",
     ]
     try:
+        # text=True without an explicit encoding uses the platform default codec (cp1252 on Windows),
+        # which can raise UnicodeDecodeError on real decompiler output -- see crawler.py's own fix for
+        # the same bug, found against a live target.
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=settings.binary_analysis_timeout_seconds, check=False,
+            encoding="utf-8", errors="replace",
         )
     except subprocess.TimeoutExpired as exc:
         raise ToolExecutionError(f"Ghidra headless analysis timed out for {binary_path}") from exc

@@ -75,6 +75,7 @@ def _check_scope_capabilities() -> None:
     try:
         result = subprocess.run(
             [settings.katana_binary, "-h"], capture_output=True, text=True, timeout=5, check=False,
+            encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ToolExecutionError("Could not verify Katana scope and redirect controls") from exc
@@ -202,16 +203,29 @@ def crawl(
     # keeps comfortable headroom over the measured 84s.
     timeout_seconds = max(120.0, depth * 90.0) * (5.0 / max(rate_per_second, 1.0))
     try:
+        # BUG FIX: found against a real live target, invisible with any fixture/synthetic test data --
+        # text=True without an explicit encoding uses the platform's default codec (cp1252 on Windows),
+        # which raises UnicodeDecodeError the moment a real crawled page's JSONL output contains a
+        # non-cp1252 byte (ordinary UTF-8 content from an actual website, not something a fixture would
+        # ever contain). The error surfaced in subprocess's own internal reader thread, not here, so it
+        # printed a traceback and silently produced truncated/empty stdout instead of raising
+        # ToolExecutionError -- every subprocess.run() in this module needs an explicit encoding.
         proc = subprocess.run(
             args, capture_output=True, text=True, timeout=timeout_seconds, check=False,
+            encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ToolExecutionError(f"katana timed out crawling {base_url} after {timeout_seconds:.0f}s") from exc
 
-    out_file.write_text(proc.stdout, encoding="utf-8")
+    # Defensive guard for the same root cause the encoding= fix above addresses: before that fix,
+    # proc.stdout could come back None (not "") if subprocess's own internal reader thread crashed with
+    # UnicodeDecodeError before ever populating it -- write_text(None) then raised its own unrelated-
+    # looking TypeError ("data must be str, not NoneType"), masking the real cause. Treated the same as
+    # empty output now, which is itself still an honest ToolExecutionError below if returncode != 0.
+    out_file.write_text(proc.stdout or "", encoding="utf-8")
     if proc.returncode != 0:
         raise ToolExecutionError(f"katana exited {proc.returncode}; partial output retained at {out_file}")
-    endpoints = _parse_katana_jsonl(proc.stdout)
+    endpoints = _parse_katana_jsonl(proc.stdout or "")
 
     # Second line of defence: drop (and log) any endpoint Katana returned that
     # the Scope Guard would reject — handles the case where Katana's own host
