@@ -1075,12 +1075,13 @@ the authorised `NetworkGraph`.
   network with this new chain wired up end to end — that is the explicit
   next step, now that both of Entry 16's open gaps are closed.
 
-- **Entry 18** — Built an offline Mininet replica of the real `192.168.60.0/24`
+- **Entry 18** — Built an offline Mininet replica of the real `<lab-subnet>/24`
   lab network (`scripts/mininet/`), so development and testing can continue
   without a connection to the real lab. All 171 hosts and 263 services come
   straight from a real discovery export (`network_graph.json`, from
   `ASSESSMENT-LIVE-REAL-003`); most get a generic banner-matching stand-in
-  (`services/svc_runner.py`), while `192.168.60.139` gets dedicated,
+  (`services/svc_runner.py`), while the one host with a real, faithfully
+  reproduced chain (the Entry 16/17 binary/console host) gets dedicated,
   behaviourally faithful services (`vault_site.py`, `game_zone.py`) — the
   real recovered `/vault/keykeeper` binary, the real trusted-proxy-header
   gating, and the real recovered passkey (`R3v3rs3_Th3_Z0n3`) for `AUTH`.
