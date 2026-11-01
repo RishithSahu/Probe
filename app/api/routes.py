@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.adapters.external_network_agent import ExternalFindingValidationError, to_findings, validate_external_findings
 from app.agents.binary_analysis.metadata import identify_binary
 from app.api.dependencies import get_db
+from app.core.execution_profile import ExecutionProfileError, preflight_check
 from app.api.schemas import (
     AgentTaskStatusResponse,
     AssessmentResponse,
@@ -81,6 +82,15 @@ def create_assessment(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> CreateAssessmentResponse:
+    # Spec item 3 / app.core.execution_profile's own stated requirement: the same live_assessment-vs-
+    # fixtures gate the CLI applies (app/orchestrator/__main__.py) must apply here too -- a FastAPI-created
+    # assessment must not be able to quietly run fixture-backed when execution_profile=live_assessment,
+    # just because this entry point forgot to call the one function that checks.
+    try:
+        preflight_check()
+    except ExecutionProfileError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
     assessment_id = request.assessment_id or f"ASSESSMENT-{uuid.uuid4().hex[:10].upper()}"
 
     binary_entries: list[tuple[str, str]] = []
