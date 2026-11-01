@@ -18,6 +18,7 @@ import logging
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -133,14 +134,44 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
                 break
 
             iteration += 1
+            # BUG FIX: the deadline above is only checked BETWEEN iterations, but one iteration's own
+            # agent dispatch (a web assessment's crawl + ZAP + content discovery, especially) has no
+            # internal time budget of its own and can legitimately run for minutes -- --max-minutes 2
+            # measurably overran to 4+ minutes this way, confirmed live. Python cannot force-kill a
+            # running thread (the same limitation run_concurrently's own docstring already documents), so
+            # this bounds how long the CLI WAITS for it, not the thread's own lifetime: once `remaining`
+            # elapses the loop stops and exits with final_status=RUNNING (genuinely incomplete, resumable)
+            # instead of silently blowing through the promised wall-clock budget. A straggler thread that
+            # finishes after this process has moved on is already fenced by reservation_token/
+            # try_complete_task (app.database.repository), so it cannot corrupt a later run's state.
             # max_inflight=1 (the default) keeps the original one-candidate-per-iteration behaviour exactly;
             # >1 dispatches up to that many independent, atomically-reserved candidates concurrently each
             # iteration (app.orchestrator.autonomous_loop.run_concurrent_iteration -- item 4/5/6 of the
             # concurrency spec), still one `while` tick per batch so the time-budget check above still applies.
-            traces = ([run_next_iteration(assessment_id, policy=policy, output_dir=output_dir, parent_task_id=parent_task_id)]
+            # NOT a `with ThreadPoolExecutor() as _pool:` block on purpose: that calls shutdown(wait=True)
+            # on exit, which would block on exactly the straggler thread this is trying to stop waiting
+            # for. shutdown(wait=False) below is the same pattern already used (and already documented as
+            # imperfect -- Python cannot force-kill a thread) elsewhere in this codebase's own dispatcher.
+            _pool = ThreadPoolExecutor(max_workers=1)
+            future = (_pool.submit(run_next_iteration, assessment_id, policy=policy, output_dir=output_dir,
+                                   parent_task_id=parent_task_id)
                      if max_inflight <= 1 else
-                     run_concurrent_iteration(assessment_id, policy=policy, output_dir=output_dir,
-                                              parent_task_id=parent_task_id, max_inflight=max_inflight))
+                     _pool.submit(run_concurrent_iteration, assessment_id, policy=policy, output_dir=output_dir,
+                                 parent_task_id=parent_task_id, max_inflight=max_inflight))
+            try:
+                result = future.result(timeout=max(remaining, 0.0))
+            except FuturesTimeoutError:
+                logger.warning(
+                    "iteration %d exceeded the remaining time budget (%.1fs left when dispatched) and is "
+                    "still running in the background; the CLI is stopping here rather than waiting "
+                    "further -- re-run with the same --assessment-id to resume once it finishes",
+                    iteration, remaining,
+                )
+                _pool.shutdown(wait=False)
+                final_status = AssessmentStatus.RUNNING
+                break
+            _pool.shutdown(wait=False)
+            traces = [result] if max_inflight <= 1 else result
 
             if all(trace.objective is None for trace in traces):
                 # A real distinction (point E): "nothing is eligible right now" is not automatically the
