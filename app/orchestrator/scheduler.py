@@ -25,10 +25,32 @@ from app.core.scope_guard import ScopeGuard
 DEFAULT_WEIGHTS: dict[str, float] = {
     "objective_relevance": 3.0,   # connected to an existing, evidence-backed unresolved lead
     "evidence_strength": 2.0,     # how solid the evidence behind that lead is
+    "weakness_depth": 2.0,        # a real protocol/binary/credential weakness, not cosmetic header hygiene
     "information_gain": 1.5,      # how much an unanswered question this could resolve
     "novelty": 1.5,               # not already attempted-without-result against the same evidence
     "execution_cost": 1.0,        # SUBTRACTED: cheaper investigations are preferred, all else equal
 }
+
+# The goal is finding and probing further into actual weaknesses -- a real protocol/credential/binary
+# issue, never "which service leads to a flag." Cosmetic hygiene findings (a missing response header) are
+# real, low-severity signal, not nothing -- but they must never outrank a genuine weakness just because
+# they happen to exist. This is the one place that distinction is scored.
+_LOW_WEAKNESS_DEPTH_METHODS = {"httpx_header_analysis", "httpx_cookie_analysis", "katana_endpoint_param_heuristic"}
+_HIGH_WEAKNESS_DEPTH_METHODS = {
+    "network_vulnerability:ftp_anonymous_login", "network_vulnerability:redis_auth_check",
+    "network_vulnerability:postgresql_auth_check", "network_vulnerability:ssh_protocol_version",
+    "hardcoded_credential", "recovered_credential", "unsafe_function_usage", "weak_binary_hardening",
+    "suspicious_input_handling", "single_credential_verification", "zap_active_scan",
+}
+
+
+def _weakness_depth(backing_findings: list[Finding]) -> float:
+    methods = {f.detection_method for f in backing_findings if f.detection_method}
+    if methods & _HIGH_WEAKNESS_DEPTH_METHODS:
+        return 1.0
+    if methods and methods <= _LOW_WEAKNESS_DEPTH_METHODS:
+        return 0.2
+    return 0.5  # everything else (e.g. zap_passive_scan, unrecognised future methods) -- real signal, unclear depth
 
 # Bounded retries (item 7): a candidate that has been attempted this many times with NO growth in its
 # backing evidence is removed from the queue entirely -- not scored low, excluded -- so the loop cannot
@@ -183,6 +205,7 @@ def generate_candidates(
                 factors={
                     "objective_relevance": 1.0 if has_evidence else 0.0,
                     "evidence_strength": strongest if has_evidence else 0.1,
+                    "weakness_depth": _weakness_depth(backing_findings) if has_evidence else 0.3,
                     "information_gain": _information_gain(service.service_name, has_evidence),
                     "novelty": novelty,
                     "execution_cost": _execution_cost(agent_id),

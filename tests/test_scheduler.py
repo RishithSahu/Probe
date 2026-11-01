@@ -24,11 +24,13 @@ from app.core.scope_guard import ScopeGuard
 from app.orchestrator.scheduler import DEFAULT_WEIGHTS, generate_candidates, select_next
 
 
-def _finding(service_id: str, *, confidence: Confidence = Confidence.HIGH, surface: Surface = Surface.BINARY) -> Finding:
+def _finding(service_id: str, *, confidence: Confidence = Confidence.HIGH, surface: Surface = Surface.BINARY,
+            detection_method: str | None = None) -> Finding:
     return Finding(
-        finding_id=f"FINDING-{service_id}-{confidence.value}", assessment_id="A", agent_id=AgentId.BINARY_ANALYSIS,
-        surface=surface, service_id=service_id, title="t", description="d", severity=Severity.MEDIUM,
-        confidence=confidence, status=FindingStatus.SUSPECTED, ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS,
+        finding_id=f"FINDING-{service_id}-{confidence.value}-{detection_method}", assessment_id="A",
+        agent_id=AgentId.BINARY_ANALYSIS, surface=surface, service_id=service_id, title="t", description="d",
+        severity=Severity.MEDIUM, confidence=confidence, status=FindingStatus.SUSPECTED,
+        ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS, detection_method=detection_method,
     )
 
 
@@ -67,6 +69,21 @@ def test_strong_evidence_outranks_routine_header_hygiene_style_candidate():
     candidates = generate_candidates(graph, [], findings, guard=_guard(graph))
     winner, _ = select_next(candidates)
     assert winner.service_id == "HOST-A:443/tcp"
+
+
+def test_a_real_weakness_outranks_a_service_with_only_cosmetic_findings():
+    """The actual 'find vulnerabilities, not flags' acceptance test: a service whose only backing evidence
+    is header/cookie hygiene must not outrank a DIFFERENT service with a genuine protocol-level weakness,
+    even if the hygiene finding has equal or higher confidence."""
+    graph = _graph(("HOST-A:21/tcp", 21, "ftp"), ("HOST-A:8080/tcp", 8080, "http"))
+    real_weakness = _finding("HOST-A:21/tcp", confidence=Confidence.MEDIUM, surface=Surface.NETWORK,
+                             detection_method="network_vulnerability:ftp_anonymous_login")
+    cosmetic = _finding("HOST-A:8080/tcp", confidence=Confidence.HIGH, surface=Surface.WEB,
+                        detection_method="httpx_header_analysis")
+    candidates = generate_candidates(graph, [], [real_weakness, cosmetic], guard=_guard(graph))
+    winner, explanation = select_next(candidates)
+    assert winner.service_id == "HOST-A:21/tcp"
+    assert explanation["selected"]["factors"]["weakness_depth"] == 1.0
 
 
 def test_scopeguard_rejection_cannot_be_overridden_by_priority():
