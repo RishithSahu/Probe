@@ -28,6 +28,7 @@ from app.core.schemas import (
 )
 from app.core.scope_guard import ToolInvocationRecord
 from app.database.inventory import persist_network_graph
+from app.database.vulnerability_lifecycle import ingest_verifier_result
 from app.database.models import (
     AgentTaskRecord,
     AssessmentRecord,
@@ -284,6 +285,8 @@ def store_findings(db: Session, findings: list[Finding], evidence: list[Evidence
         record.raw_data = e.raw_data
         record.timestamp = e.timestamp
     db.flush()
+    for finding in findings:
+        ingest_verifier_result(db, db.get(FindingRecord, finding.finding_id))
 
 
 def update_finding_status(db: Session, finding_id: str, status: str, *, verification_required: bool) -> None:

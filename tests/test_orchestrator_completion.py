@@ -48,7 +48,10 @@ def _set_task_statuses(assessment_id: str, statuses: dict[AgentId, TaskStatus]) 
     db.close()
 
 
-def test_benign_warning_with_all_tasks_skipped_is_completed_not_partial(assessment_id):
+def test_benign_warning_with_all_tasks_skipped_is_incomplete_not_partial(assessment_id):
+    # Fixed bug: nothing was ever actually attempted here (every task SKIPPED) -- that must never be
+    # reported as "completed" just because nothing failed either. It is also not "partially_completed"
+    # (nothing partial or failed happened): it is INCOMPLETE, a third, distinct outcome.
     _set_task_statuses(assessment_id, {
         AgentId.WEB_SECURITY: TaskStatus.SKIPPED,
         AgentId.BINARY_ANALYSIS: TaskStatus.SKIPPED,
@@ -59,7 +62,7 @@ def test_benign_warning_with_all_tasks_skipped_is_completed_not_partial(assessme
         "errors": ["validate_scope: allow_passive_web_analysis is enabled but no HTTP/HTTPS services were found in the graph"],
     }
     result = complete_assessment(state)
-    assert result["assessment_status"] == "completed"
+    assert result["assessment_status"] == "incomplete"
 
 
 def test_all_attempted_tasks_completed_is_completed(assessment_id):
@@ -90,8 +93,27 @@ def test_all_attempted_tasks_failed_is_failed(assessment_id):
     assert result["assessment_status"] == "failed"
 
 
-def test_nothing_attempted_at_all_is_completed(assessment_id):
-    # No tasks recorded (e.g. validate_assessment failed before create_agent_tasks ran) —
-    # not the scenario this test targets, but complete_assessment must not crash on it.
+def test_only_a_blocked_dependency_is_reported_blocked_not_completed(assessment_id):
+    # A BLOCKED task (e.g. authorised_credential_access awaiting operator approval, or Log Monitor's
+    # missing HTTP Basic Auth credential) with nothing else attempted must be its own, honest outcome --
+    # distinct from both "completed" and the generic "incomplete" (nothing ever got a chance to run).
+    _set_task_statuses(assessment_id, {AgentId.BINARY_ANALYSIS: TaskStatus.BLOCKED})
     result = complete_assessment({"assessment_id": assessment_id, "errors": []})
-    assert result["assessment_status"] == "completed"
+    assert result["assessment_status"] == "blocked"
+
+
+def test_blocked_dependency_alongside_completed_work_is_partially_completed(assessment_id):
+    _set_task_statuses(assessment_id, {
+        AgentId.WEB_SECURITY: TaskStatus.COMPLETED,
+        AgentId.BINARY_ANALYSIS: TaskStatus.BLOCKED,
+    })
+    result = complete_assessment({"assessment_id": assessment_id, "errors": []})
+    assert result["assessment_status"] == "partially_completed"
+
+
+def test_nothing_attempted_at_all_is_incomplete(assessment_id):
+    # No tasks recorded (e.g. validate_assessment failed before create_agent_tasks ran). Fixed bug: this
+    # used to fall through to "completed" (an empty queue is not the same thing as finished work) --
+    # complete_assessment must not crash on it, but it must also not claim success.
+    result = complete_assessment({"assessment_id": assessment_id, "errors": []})
+    assert result["assessment_status"] == "incomplete"
