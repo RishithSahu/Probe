@@ -8,6 +8,7 @@ same policy applies across all three surfaces.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Iterable
 from urllib.parse import parse_qs, urlsplit
@@ -57,6 +58,22 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 
+def _stable_finding_id(*parts: str) -> str:
+    """Deterministic, content-addressed finding_id for the SAME logical weakness (item: found live in
+    app.agents.network_vulnerability.findings -- the same uuid4()-per-call pattern there let one
+    repeatable check accumulate 500+ duplicate Finding rows for a single service in under a minute, and
+    defeated app.orchestrator.scheduler's finding-id-set novelty check, which then kept re-dispatching
+    that one candidate and starving the rest of the assessment's time budget. The Web Security agent's
+    checks (missing headers, insecure cookies, ZAP alerts, discovered endpoints, access-control bypass
+    probes) are exactly as repeatable across a re-crawl/re-scan of the same target, so they carry the
+    identical risk and get the identical fix here: the SAME logical finding always re-derives the SAME id,
+    so re-observing it updates the existing row (see app.database.repository.store_findings' upsert-by-id)
+    instead of minting a duplicate."""
+    fingerprint = ":".join(str(p) for p in parts)
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:10]
+    return f"WEB-{digest}"
+
+
 def findings_from_fingerprint(
     result: FingerprintResult, *, assessment_id: str, asset_id: str
 ) -> tuple[list[Finding], list[Evidence]]:
@@ -76,7 +93,7 @@ def findings_from_fingerprint(
     missing = [h for h in MISSING_SECURITY_HEADERS if h not in present_lower
                and (h != "strict-transport-security" or urlsplit(result.final_url).scheme == "https")]
     if missing:
-        finding_id = _new_id("WEB")
+        finding_id = _stable_finding_id(assessment_id, asset_id, result.final_url, "httpx_header_analysis")
         evidence_id = _new_id("EVIDENCE")
         evidence.append(
             Evidence(
@@ -113,7 +130,9 @@ def findings_from_fingerprint(
 
     for cookie in result.cookies:
         if not cookie.get("secure") or not cookie.get("httponly"):
-            finding_id = _new_id("WEB")
+            finding_id = _stable_finding_id(
+                assessment_id, asset_id, result.final_url, cookie.get("name") or "", "httpx_cookie_analysis",
+            )
             evidence_id = _new_id("EVIDENCE")
             problems = []
             if not cookie.get("secure"):
@@ -167,7 +186,10 @@ def findings_from_zap_alerts(
     findings: list[Finding] = []
     evidence: list[Evidence] = []
     for alert in alerts:
-        finding_id = _new_id("WEB")
+        finding_id = _stable_finding_id(
+            assessment_id, asset_id, alert.url, alert.plugin_id, alert.param or "",
+            "zap_synthetic_fixture" if used_fixture else "zap_alert",
+        )
         evidence_id = _new_id("EVIDENCE")
         evidence.append(
             Evidence(
@@ -235,7 +257,10 @@ def findings_from_discovered_endpoints(
                 continue
             seen.add(key)
 
-            finding_id = _new_id("WEB")
+            finding_id = _stable_finding_id(
+                assessment_id, asset_id, base_url, param,
+                "katana_synthetic_fixture" if used_fixture else "katana_endpoint_param_heuristic",
+            )
             evidence_id = _new_id("EVIDENCE")
             evidence.append(
                 Evidence(
@@ -293,7 +318,7 @@ def findings_from_access_control_bypass_hits(
     findings: list[Finding] = []
     evidence: list[Evidence] = []
     for hit in hits:
-        finding_id = _new_id("WEB")
+        finding_id = _stable_finding_id(assessment_id, asset_id, base_url, hit.header, "trusted_proxy_header_bypass_probe")
         evidence_id = _new_id("EVIDENCE")
         evidence.append(Evidence(
             evidence_id=evidence_id, finding_id=finding_id, evidence_type="access_control_bypass_probe",
