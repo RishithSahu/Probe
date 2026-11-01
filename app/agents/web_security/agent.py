@@ -43,6 +43,19 @@ logger = logging.getLogger("ape.web_agent")
 # unbounded number of ZAP scans per target.
 _MAX_ZAP_ENDPOINT_TARGETS = 10
 
+# BUG FIX: found live -- a single web_security_agent dispatch against one service took ~55 minutes
+# against a 15-minute assessment time budget. Root cause: run_passive_scan's own wait (max_wait=30s) plus
+# run_active_scan_if_authorised's own wait (max_wait=300s) are each individually bounded, but the loop
+# below runs BOTH, back to back, for every one of up to _MAX_ZAP_ENDPOINT_TARGETS (10) endpoints, with NO
+# cap on the TOTAL time spent across the whole loop: 10 * (30 + 300) = 3300s = exactly the ~55 minutes
+# observed. The orchestrator's own outer "stop waiting past the time budget" guard (app/orchestrator/
+# __main__.py) only bounds how long the CLI WAITS for a dispatch, never the dispatch's own work (Python
+# cannot force-kill a running thread -- see that module's own comments), so nothing upstream could have
+# caught this; the agent's own loop must bound itself. _MAX_ZAP_WALL_SECONDS is a hard wall-clock budget
+# for Stage C as a whole: once exceeded, remaining endpoints are skipped (recorded, not silently dropped)
+# rather than each demanding their own full allowance.
+_MAX_ZAP_WALL_SECONDS = 180.0
+
 
 class WebTarget:
     """One graph-listed web service to assess, as handed to this agent by the
@@ -129,7 +142,14 @@ def assess_target(
         seen_zap_targets.add(base)
         zap_targets.append(base)
 
+    zap_stage_deadline = time.monotonic() + _MAX_ZAP_WALL_SECONDS
     for zap_url in zap_targets:
+        if time.monotonic() >= zap_stage_deadline:
+            errors.append(
+                f"zap_scan: stopped at wall-clock budget ({_MAX_ZAP_WALL_SECONDS:.0f}s) with "
+                f"{len(zap_targets) - zap_targets.index(zap_url)} endpoint(s) left unscanned, including {zap_url!r}"
+            )
+            break
         try:
             passive = run_passive_scan(zap_url, asset_id=target.asset_id, scope_guard=scope_guard)
             tool_executions.append({"tool": "zap_passive", "target": zap_url, "used_fixture": passive.used_fixture})
