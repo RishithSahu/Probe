@@ -89,6 +89,14 @@ def _load_or_create(
         ))
     if network_graph_path:
         graph = NetworkGraph.model_validate(json.loads(Path(network_graph_path).read_text()))
+        # BUG FIX: a supplied graph file's own `scope_id` (however it happened to be generated when the
+        # file was produced) almost never matches this CLI's canonical `SCOPE-{scope.replace('/','-')}`
+        # format byte-for-byte (e.g. "SCOPE-192-168-60-0-24" vs "SCOPE-192.168.60.0-24") -- persist_network_
+        # graph's own scope check (app/database/inventory.py) then always fails for ANY pre-existing graph
+        # file, confirmed live. The canonical form, derived from --scope here, is the one source of truth
+        # for this assessment's scope identity; a supplied file's own label is cosmetic and gets normalised
+        # to it rather than trusted verbatim.
+        graph.scope_id = f"SCOPE-{scope.replace('/', '-')}"
         logger.info("initialised %s (scope=%s) from supplied graph file %s", assessment_id, scope, network_graph_path)
     else:
         graph = _start_probe_and_discover(scope, assessment_id, port=probe_port, probe_minutes=probe_minutes)
@@ -125,7 +133,7 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 logger.info("time budget (%.1f min) exhausted after %d iteration(s)", max_minutes, iteration)
-                final_status = AssessmentStatus.RUNNING  # genuinely incomplete, not blocked -- more time helps
+                final_status = AssessmentStatus.INCOMPLETE  # not blocked -- more time would let it continue
                 break
 
             iteration += 1
@@ -163,7 +171,7 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
                     iteration, remaining,
                 )
                 _pool.shutdown(wait=False)
-                final_status = AssessmentStatus.RUNNING
+                final_status = AssessmentStatus.INCOMPLETE  # resumable; a straggler may still be running
                 break
             _pool.shutdown(wait=False)
             traces = [result] if max_inflight <= 1 else result
@@ -174,7 +182,7 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
                 # apart beyond the scheduler's own reason text, this is reported honestly as incomplete,
                 # not silently marked complete.
                 logger.info("iteration %d: no justified next action -- %s", iteration, traces[0].blocked_reason)
-                final_status = AssessmentStatus.FAILED  # "blocked", in this schema's vocabulary
+                final_status = AssessmentStatus.BLOCKED
                 break
 
             for trace in traces:
@@ -196,15 +204,19 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
     except KeyboardInterrupt:
         logger.info("interrupted by user after %d iteration(s) -- state is persisted; re-run the same "
                    "command with the same --assessment-id to resume", iteration)
-        final_status = AssessmentStatus.RUNNING
+        final_status = AssessmentStatus.INCOMPLETE
         with session_scope() as db:
             repository.update_assessment_status(db, assessment_id, final_status)
         return 130
 
+    # BUG FIX: this used to stamp completed_at whenever final_status != RUNNING -- but INCOMPLETE is
+    # exactly "stopped early, resumable," never a terminal outcome; marking it with a completion timestamp
+    # falsely implied the assessment was done. Only genuinely terminal statuses get one.
+    is_terminal = final_status not in (AssessmentStatus.RUNNING, AssessmentStatus.INCOMPLETE)
     with session_scope() as db:
         repository.update_assessment_status(
             db, assessment_id, final_status,
-            completed_at=datetime.now(timezone.utc) if final_status != AssessmentStatus.RUNNING else None,
+            completed_at=datetime.now(timezone.utc) if is_terminal else None,
         )
     return 0
 
