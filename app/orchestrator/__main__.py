@@ -110,6 +110,16 @@ def _load_or_create(
 
 def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: str | None = None, *,
        probe_port: int = 8080, probe_minutes: float = 5.0, max_inflight: int = 1) -> int:
+    # BUG FIX: this used to be set AFTER _load_or_create(), which starts Probe and waits (synchronously)
+    # for discovery to finish -- up to --probe-minutes of real scanning, plus up to 180s just for its API
+    # to come up. --max-minutes is documented and named as this command's own time budget ("run --scope ...
+    # --max-minutes 20" is the one usage example this module's docstring gives); a user who passes 20 does
+    # not expect the process to still be running 20 minutes after discovery alone took 4 more. Anchoring
+    # the deadline at the top, before any of that happens, makes --max-minutes bound the whole invocation,
+    # matching what it says on the label. A run that is RESUMING an existing assessment_id skips discovery
+    # entirely (_load_or_create returns immediately), so this costs those runs nothing.
+    deadline = time.monotonic() + max_minutes * 60
+
     from app.core.execution_profile import preflight_check
     preflight_check()  # item 9: refuses to start a live_assessment run with fixture fallbacks still enabled
 
@@ -120,7 +130,6 @@ def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: 
     init_db()
     policy = _load_or_create(assessment_id, scope, network_graph_path, probe_port=probe_port, probe_minutes=probe_minutes)
     output_dir = Path(settings.evidence_dir) / assessment_id / "autonomous"
-    deadline = time.monotonic() + max_minutes * 60
 
     with session_scope() as db:
         repository.update_assessment_status(db, assessment_id, AssessmentStatus.RUNNING)
