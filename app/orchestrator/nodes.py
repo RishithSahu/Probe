@@ -30,7 +30,7 @@ from app.analysis.attack_paths import build_attack_path_graph
 from app.analysis.evidence_validator import run_evidence_validation
 from app.analysis.ptes_mapper import summarise_activities
 from app.core.config import settings
-from app.core.exceptions import AppError, GraphValidationError
+from app.core.exceptions import AppError, GraphValidationError, ScopeViolationError, ToolExecutionError
 from app.core.schemas import (
     AgentId,
     AgentResult,

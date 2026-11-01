@@ -97,12 +97,24 @@ def _information_gain(service_name: str | None, has_evidence: bool) -> float:
     return 0.3
 
 
+def _web_url_for(asset_id: str, service_id: str) -> str:
+    """The same URL app.orchestrator.autonomous_loop._execute_objective actually dispatches to for this
+    service -- port included. BUG FIX: this eligibility check used to always probe `http://{asset_id}/`
+    (implicitly port 80) regardless of the service's real port, so a port-443/8080/etc. service's
+    eligibility was checked against the WRONG origin. Invisible as long as ScopeGuard's empty-origin-list
+    check was a no-op (see that fix's own note); once it actually enforces origins, checking the wrong URL
+    here made an otherwise-legitimate candidate wrongly ineligible."""
+    port = service_id.split(":")[1].split("/")[0]
+    scheme = "https" if port in ("443", "8443") else "http"
+    return f"{scheme}://{asset_id}:{port}/"
+
+
 def _eligible(agent_id: AgentId, asset_id: str, service_id: str, *, guard: ScopeGuard) -> tuple[bool, str]:
     """The ONE gate a score can never override. Returns (eligible, reason-if-not)."""
     try:
         guard.check_asset_in_scope(asset_id)
         if agent_id == AgentId.WEB_SECURITY:
-            guard.check_passive_web_analysis_allowed(asset_id, f"http://{asset_id}/")
+            guard.check_passive_web_analysis_allowed(asset_id, _web_url_for(asset_id, service_id))
         else:
             guard.check_service_assessment_allowed(asset_id, service_id)
     except DryRunSkipped:

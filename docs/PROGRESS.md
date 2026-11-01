@@ -884,3 +884,58 @@ the authorised `NetworkGraph`.
   remaining half), PostgreSQL verified end-to-end against a real server
   (item 8), the generic evidence-graph model, the multi-worker CLI, the
   remaining concurrency tests, and the load/scaling demonstration.
+
+- **Entry 13** — Found and fixed a real scope-enforcement security bug while
+  reviewing a live run's own 465-finding output, not by inspection: the Web
+  Security Agent's ZAP stage had been dispatched against third-party internet
+  domains (`cdn.jsdelivr.net`, `cdnjs.cloudflare.com`, `code.jquery.com`) that
+  Katana's real crawl happened to reference — confirmed directly from that
+  run's own `scope_guard` audit log (`op=target_check ... allowed=True` for
+  those exact domains), not merely inferred from the findings.
+
+  **Root cause**: `ScopeGuard.__init__` builds `_approved_asset_ids` with a
+  deliberate fallback — "no explicit list" defaults to every known graph
+  asset (minus held ones), never to "everything, including the unknown."
+  `_approved_origins` had no such fallback: it was just
+  `{normalise(o) for o in policy.approved_web_origins}`, an **empty set**
+  when the policy left it unset. `check_web_target_in_scope`'s own check —
+  `if self._approved_origins and origin not in self._approved_origins` —
+  only enforces the restriction when the set is non-empty, so an empty set
+  didn't mean "nothing is approved," it meant **the check was skipped
+  entirely**. Any assessment created without explicitly populating
+  `approved_web_origins` — including `app/orchestrator/__main__.py`'s own
+  default policy, used by every real run so far this session — had *no* web
+  scope enforcement at all.
+
+  **Fix**: `ScopeGuard` now defaults `_approved_origins`, when left empty,
+  to the origins of the graph's own web-shaped services (by name — http,
+  https, http-alt, etc. — or well-known web port) belonging to approved
+  assets — mirroring `_approved_asset_ids`'s existing shape of fallback,
+  never "everything." Covers both URL conventions the codebase actually
+  uses for a given asset (`asset_id` as host, per
+  `autonomous_loop`'s own fingerprint/crawl dispatch; `asset.ip`/
+  `asset.hostname`, per whatever a discovered binary/content reference
+  itself reported) rather than assuming only one.
+
+  **A second, independent bug this surfaced** (invisible exactly as long as
+  the above check was a no-op): `app.orchestrator.scheduler._eligible()`'s
+  own web-eligibility pre-check always probed `http://{asset_id}/` —
+  implicitly port 80 — regardless of the service's real port, so a
+  port-443/8080/etc. service's eligibility was checked against the *wrong*
+  origin. Fixed with a new `_web_url_for()` that builds the same
+  port-aware URL the real dispatch uses.
+
+  **A third, independent bug this surfaced**: `app/orchestrator/nodes.py`
+  referenced `ScopeViolationError` and `ToolExecutionError` in an
+  `except (...)` clause without ever importing either — a bare `NameError`
+  the instant a scope denial became reachable there for the first time
+  (previously, nothing in that path could ever actually raise
+  `ScopeViolationError`, since the check being guarded was a no-op). Fixed
+  the missing import.
+
+  **Tests** (`tests/test_scope_guard.py`): an empty `approved_web_origins`
+  still denies the exact two real-world domains this run leaked to; the
+  same empty policy still correctly allows the graph's own already-known
+  web services (not an overcorrection to "deny everything"); an explicit,
+  non-empty `approved_web_origins` still overrides the default exactly as
+  before. Full suite: **499 passed, 4 skipped**, re-run twice clean.

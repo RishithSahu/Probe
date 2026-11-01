@@ -22,6 +22,14 @@ from app.core.schemas import AssessmentPolicy, NetworkGraph
 
 logger = logging.getLogger("ape.scope_guard")
 
+# What counts as "a web service" when deriving a default set of approved origins from the graph itself
+# (see ScopeGuard.__init__) -- the same generic, name-or-port heuristic app.orchestrator.scheduler uses to
+# route a service to the Web Security Agent in the first place, duplicated here rather than imported to
+# keep app.core free of a dependency on app.orchestrator.
+_WEB_SERVICE_NAMES = {"http", "https", "http-alt", "https-alt", "http-proxy"}
+_WEB_PORTS = {80, 443, 8000, 8008, 8080, 8443, 8880, 8888}
+_TLS_PORTS = {443, 8443}
+
 
 @dataclass(frozen=True)
 class ToolInvocationRecord:
@@ -58,8 +66,49 @@ class ScopeGuard:
         self._approved_asset_ids: set[str] = set(policy.approved_asset_ids) or (
             self._known_asset_ids - self._held_asset_ids
         )
-        self._approved_origins = {self._normalise_origin(o) for o in policy.approved_web_origins}
+        # BUG FIX: unlike _approved_asset_ids just above, this had NO fallback when
+        # policy.approved_web_origins was empty -- check_web_target_in_scope's
+        # `if self._approved_origins and origin not in self._approved_origins` only
+        # enforces the restriction when the set is non-empty, so an empty set didn't mean
+        # "nothing is approved," it meant "the check is skipped entirely." Any assessment
+        # created without explicitly listing approved_web_origins (e.g. the orchestrator
+        # CLI's default policy) therefore let the Web Security Agent/ZAP touch ANY origin,
+        # including third-party internet domains Katana's own crawl happened to reference
+        # (cdn.jsdelivr.net, cdnjs.cloudflare.com, code.jquery.com -- all logged "allowed",
+        # confirmed against a real run's own scope_guard audit log, not merely inferred).
+        # Fixed with the same shape of fallback _approved_asset_ids already has: default to
+        # the graph's own web-shaped services (never third-party domains, never a held
+        # asset) instead of to "everything."
+        explicit_origins = {self._normalise_origin(o) for o in policy.approved_web_origins}
+        self._approved_origins = explicit_origins or self._default_web_origins()
         self.audit_log: list[ToolInvocationRecord] = []
+
+    def _default_web_origins(self) -> set[str]:
+        if not self.graph:
+            return set()
+        origins: set[str] = set()
+        for asset in self.graph.assets:
+            if asset.asset_id not in self._approved_asset_ids:
+                continue
+            # Two different conventions are both real in this codebase: app.orchestrator.autonomous_loop
+            # builds the Web Agent's OWN fingerprint/crawl target as f"http://{asset_id}:{port}" (asset_id
+            # as host, even when ip is recorded separately), but a discovered binary/content reference
+            # carries whatever URL the Web Agent itself actually found -- which uses asset.ip when asset_id
+            # is a purely symbolic identifier that differs from it. Covering only one would make a real,
+            # legitimate target fall outside its own default origin depending on which path reached it.
+            hosts = {asset.asset_id}
+            if asset.ip:
+                hosts.add(asset.ip)
+            if asset.hostname:
+                hosts.add(asset.hostname)
+            for svc in asset.services:
+                name = (svc.service_name or "").lower()
+                if name not in _WEB_SERVICE_NAMES and svc.port not in _WEB_PORTS:
+                    continue
+                scheme = "https" if svc.port in _TLS_PORTS else "http"
+                for host in hosts:
+                    origins.add(self._normalise_origin(f"{scheme}://{host}:{svc.port}"))
+        return origins
 
     # -- internal -----------------------------------------------------------
 
