@@ -22,6 +22,11 @@ def finding(**overrides):
         description="Observed response", severity=Severity.LOW,
         confidence=Confidence.HIGH, evidence_refs=["E-1"],
         detection_method="httpx_header_analysis",
+        # Required by evidence_validator._supports_deterministic_check's own replay check (recheck the
+        # observation instead of trusting a method label alone) -- data.get("url") must equal this, and
+        # a bare "no affected_url at all" is unconditionally rejected. Added when these fixtures predated
+        # that tightening; kept here instead of weakening the validator for the test's convenience.
+        affected_url="http://host-a/",
     )
     fields.update(overrides)
     return Finding(**fields)
@@ -31,7 +36,7 @@ def observation(**overrides):
     fields = dict(
         evidence_id="E-1", finding_id="F-1", evidence_type="http_response",
         source_tool="httpx", description="Observed headers",
-        raw_data={"headers": {}, "missing": ["x-frame-options"]},
+        raw_data={"headers": {}, "missing": ["x-frame-options"], "url": "http://host-a/", "status_code": 200},
     )
     fields.update(overrides)
     return Evidence(**fields)
@@ -106,8 +111,11 @@ def test_method_label_cannot_auto_confirm_unrelated_or_contradictory_data(overri
     ({"name": "session"}, FindingStatus.SUSPECTED),
 ])
 def test_cookie_promotion_requires_observed_insecure_flags(data, expected):
+    # The common replay check (url/status_code matching the finding) applies before any method-specific
+    # branch -- these need it too, same as the header test's observation() default.
     validated, _ = run_evidence_validation(
-        [finding(detection_method="httpx_cookie_analysis")], [observation(raw_data=data)],
+        [finding(detection_method="httpx_cookie_analysis")],
+        [observation(raw_data={**data, "url": "http://host-a/", "status_code": 200})],
     )
     assert validated[0].status == expected
 

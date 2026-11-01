@@ -174,6 +174,23 @@ class FindingRecord(Base):
     evidence: Mapped[list["EvidenceRecord"]] = relationship(back_populates="finding", cascade="all, delete-orphan")
 
 
+class VulnerabilityLifecycleEventRecord(Base):
+    """Append-only history of a finding's verification_state over time (see
+    app.database.vulnerability_lifecycle.ingest_verifier_result). FindingRecord.verification_state is only
+    ever the CURRENT value; three findings from one task can each move through suspected -> verified/
+    inconclusive independently, and a finding can be re-verified later as new evidence arrives -- this
+    table is what lets a report or reviewer see that sequence instead of only the latest state."""
+    __tablename__ = "vulnerability_lifecycle_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    finding_id: Mapped[str] = mapped_column(String(64), ForeignKey("findings.finding_id"), index=True)
+    assessment_id: Mapped[str] = mapped_column(String(64), index=True)
+    verification_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    verifier: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recorded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class EvidenceRecord(Base):
     __tablename__ = "evidence"
 
