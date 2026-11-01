@@ -9,6 +9,7 @@ from __future__ import annotations
 import ssl
 import time
 from dataclasses import dataclass, field
+from http.cookies import CookieError, SimpleCookie
 from typing import Any
 
 import httpx
@@ -43,20 +44,18 @@ def _redact_headers(headers: httpx.Headers) -> dict[str, str]:
 
 def _inspect_cookies(response: httpx.Response) -> list[dict[str, Any]]:
     cookies = []
-    for name, value in response.cookies.items():
-        set_cookie_headers = [h for h in response.headers.get_list("set-cookie") if h.startswith(f"{name}=")]
-        raw = set_cookie_headers[0] if set_cookie_headers else ""
-        cookies.append(
-            {
-                "name": name,
-                "secure": "secure" in raw.lower(),
-                "httponly": "httponly" in raw.lower(),
-                "samesite": next(
-                    (p.split("=", 1)[1].strip() for p in raw.split(";") if p.strip().lower().startswith("samesite=")),
-                    None,
-                ),
-            }
-        )
+    for raw in response.headers.get_list("set-cookie"):
+        parsed = SimpleCookie()
+        try:
+            parsed.load(raw)
+        except CookieError:
+            continue  # malformed data is not evidence of absent flags
+        for name, morsel in parsed.items():
+            cookies.append({
+                "name": name, "secure": bool(morsel["secure"]),
+                "httponly": bool(morsel["httponly"]), "samesite": morsel["samesite"] or None,
+                "path": morsel["path"] or None, "domain": morsel["domain"] or None,
+            })
     return cookies
 
 
@@ -91,22 +90,32 @@ def fingerprint_url(
 
     redirect_chain: list[str] = []
     start = time.monotonic()
+    deadline = start + timeout_seconds
     try:
-        with httpx.Client(timeout=timeout_seconds, verify=True, follow_redirects=False) as client:
+        with httpx.Client(timeout=timeout_seconds, verify=True, follow_redirects=False, trust_env=False) as client:
             current_url = url
             response: httpx.Response | None = None
             for _ in range(10):  # hard cap independent of policy, avoids infinite loops
-                response = client.get(current_url)
-                if response.is_redirect:
-                    next_url = str(response.headers.get("location", ""))
-                    if not next_url:
-                        break
-                    next_url = str(httpx.URL(current_url).join(next_url))
-                    scope_guard.check_redirect_allowed(current_url, next_url)
-                    redirect_chain.append(current_url)
-                    current_url = next_url
-                    continue
-                break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise httpx.TimeoutException("Fingerprint observation exceeded its total time budget")
+                # Fingerprinting needs response metadata, never a potentially
+                # unbounded body. Closing each streamed response also releases
+                # its connection before following an authorised redirect.
+                with client.stream("GET", current_url, timeout=remaining) as received:
+                    response = received
+                    if response.is_redirect:
+                        next_url = str(response.headers.get("location", ""))
+                        if not next_url:
+                            break
+                        next_url = str(httpx.URL(current_url).join(next_url))
+                        scope_guard.check_redirect_allowed(current_url, next_url)
+                        redirect_chain.append(current_url)
+                        current_url = next_url
+                        continue
+                    break
+            else:
+                raise httpx.TooManyRedirects("Fingerprint redirect limit reached")
             assert response is not None
             elapsed_ms = (time.monotonic() - start) * 1000
             tls_version, tls_subject = _tls_metadata(response)

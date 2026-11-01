@@ -10,3 +10,7 @@ inputs
 tests
 .env
 *.md
+output
+probe-data
+tmp
+*.log

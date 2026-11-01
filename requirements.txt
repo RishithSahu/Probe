@@ -6,11 +6,9 @@ pydantic-settings==2.8.1
 langgraph==1.2.19
 
 # Database
-# SQLite is the default (stdlib sqlite3, no extra driver needed). Uncomment
-# psycopg2-binary below only if APE_DATABASE_URL is pointed at PostgreSQL.
+# SQLite uses the standard library; no separate database driver is needed.
 SQLAlchemy==2.0.29
 alembic==1.20.1
-# psycopg2-binary==2.9.11
 
 # Web Security Agent
 httpx==0.28.1
@@ -35,9 +33,4 @@ reportlab==5.1.0
 # that machine, with Npcap (Windows) or libpcap (Linux/macOS) present:
 #   pip install -r requirements.txt -r requirements-probe.txt
 
-# Testing / quality (dev only — also installed in the orchestrator image so
-# `pytest`/`ruff` can be run inside the container if preferred over host)
-pytest==8.4.2
-pytest-cov==7.0.0
-pypdf==6.15.0
-ruff==0.17.1
+# Test and quality tools are installed separately via requirements-dev.txt.

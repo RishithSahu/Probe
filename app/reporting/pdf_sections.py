@@ -1,19 +1,23 @@
 """Readable report sections built only from the consolidated report data."""
 from __future__ import annotations
 
+import json
+import re
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.platypus import KeepTogether, LongTable, PageBreak, Paragraph, Spacer, TableStyle
+from reportlab.platypus import LongTable, PageBreak, Paragraph, Spacer, TableStyle
 
 
 def text(value) -> str:
-    return escape(str(value if value is not None else "unknown"))
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(value if value is not None else "unknown"))
+    return escape(value).replace("\n", "<br/>")
 
 
 def table(headers, rows, styles, width):
     cells = [[Paragraph(text(value), styles["BodyText"]) for value in row] for row in [headers, *rows]]
-    return LongTable(cells, colWidths=[width / len(headers)] * len(headers), repeatRows=1, hAlign="LEFT", style=TableStyle([
+    return LongTable(cells, colWidths=[width / len(headers)] * len(headers), repeatRows=1,
+                     splitInRow=1, hAlign="LEFT", style=TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e2e8f0")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
@@ -73,7 +77,7 @@ def inventory_section(data, styles, width):
 
 
 def attack_paths_section(data, styles):
-    parts = [PageBreak(), Paragraph("Attack Paths and Observed Relationships", styles["Heading1"])]
+    parts = [Paragraph("Attack Paths and Observed Relationships", styles["Heading1"])]
     parts.append(Paragraph(
         "Connectivity and potential relationships do not prove access. A confirmed weakness describes a weakness; "
         "it does not establish an access transition. Only separately validated transition evidence can support that claim.",
@@ -96,12 +100,12 @@ def attack_paths_section(data, styles):
             f"Relation: {text(relation)}. Finding: {text(edge.get('finding_id') or 'none')}. "
             f"Evidence-backed indicator: {text(bool(edge.get('evidence_backed')))}.", styles["Normal"],
         ))
-        parts.append(KeepTogether(group))
+        parts.extend(group)
     return parts
 
 
 def evidence_section(data, styles):
-    parts = [PageBreak(), Paragraph("Evidence Index", styles["Heading1"])]
+    parts = [Paragraph("Evidence Index", styles["Heading1"])]
     parts.append(Paragraph(
         "This index links observations to findings. The JSON report retains structured excerpts and artifact references. "
         "An evidence reference alone does not establish that its contents prove the claim.", styles["Normal"],
@@ -116,4 +120,42 @@ def evidence_section(data, styles):
             f"Tool: {text(item.get('source_tool'))}.", styles["Normal"],
         ))
         parts.append(Paragraph(text(item.get("description", "")), styles["Normal"]))
+        if item.get("storage_path"):
+            parts.append(Paragraph(f"Artifact reference: {text(item['storage_path'])}", styles["Normal"]))
+        raw = item.get("raw_data") or {}
+        if raw:
+            excerpt = json.dumps(raw, ensure_ascii=True, default=str, indent=2)
+            parts.append(Paragraph(f"Structured evidence excerpt:<br/>{text(excerpt[:3000])}", styles["BodyText"]))
+            if len(excerpt) > 3000:
+                parts.append(Paragraph("Excerpt limited to 3,000 characters. The JSON report retains the complete redacted record.", styles["Normal"]))
+    return parts
+
+
+def measurement_section(data, styles, width):
+    metrics = data.get("execution_metrics") or {}
+    audit = data.get("scope_audit") or {}
+    parts = [Paragraph("Execution Measurements and Scope Audit", styles["Heading2"])]
+    parts.append(table(["Measurement", "Recorded result"], [
+        ["Execution measurements", json.dumps(metrics, default=str) if metrics else "Not recorded"],
+        ["Independent scope audit", json.dumps(audit, default=str) if audit else "Not recorded"],
+        ["Great target assessment", (data.get("great_readiness") or {}).get("status", "not demonstrated")],
+    ], styles, width))
+    parts.append(Paragraph(
+        "Unmeasured coverage, runtime and scope enforcement remain unknown. A completed task does not establish full network coverage.",
+        styles["Normal"],
+    ))
+    if data.get("report_source", {}).get("kind") == "persisted_snapshot":
+        parts.append(Paragraph(
+            "Saved-state snapshot: tools were not rerun. Task completion does not establish complete surface coverage.",
+            styles["Normal"],
+        ))
+    if data.get("task_ledger"):
+        parts.append(Paragraph("Persisted Task Ledger", styles["Heading2"]))
+        parts.append(table(["Task / agent", "Execution / provenance", "Status / verification"], [
+            [f"{task['task_id']} / {task['agent_id']}",
+             f"{task.get('execution_method') or 'not recorded'}; initiated by {task.get('initiated_by') or 'unknown'}; "
+             f"parent {task.get('parent_task_id') or 'none'}",
+             f"{task['status']}; task-level verification {task.get('verification_status') or 'unknown'}"]
+            for task in data["task_ledger"]
+        ], styles, width))
     return parts

@@ -230,4 +230,7 @@ def run_evidence_validation(findings: list[Finding], evidence: list[Evidence]) -
         if f.status == FindingStatus.CONFIRMED and before_by_id.get(f.finding_id) != FindingStatus.CONFIRMED
     ]
     _stamp_verification(findings, report, set(report.auto_confirmed))
+    # Promotion creates copies. Persisted/returned copies need the same verdict
+    # as the original inputs; task completion cannot reconstruct this later.
+    _stamp_verification(promoted, report, set(report.auto_confirmed))
     return promoted, report

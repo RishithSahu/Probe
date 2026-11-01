@@ -24,3 +24,9 @@ inputs/binaries/*
 # Network Discovery Probe (teammate's component)
 probe-data/
 probe-scope.txt
+
+# Generated, synthetic website/report previews (not application inputs).
+output/workspace-preview/
+# Incident databases and backups may contain protected assessment material.
+/incident-recovery/
+/backups/

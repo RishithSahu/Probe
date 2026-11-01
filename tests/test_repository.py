@@ -47,8 +47,7 @@ if _configured_url and not _configured_url.startswith("sqlite"):
         _DB_AVAILABLE = False
 else:
     # Default path: a private SQLite file, no network/service dependency at all.
-    _tmp_db_path = Path(tempfile.gettempdir()) / "ape_test_repository.db"
-    _tmp_db_path.unlink(missing_ok=True)
+    _tmp_db_path = Path(os.environ["APE_TEST_ROOT"]) / "repository.db"
     _engine = create_engine(f"sqlite:///{_tmp_db_path}", connect_args={"check_same_thread": False})
     _DB_AVAILABLE = True
 
@@ -57,6 +56,8 @@ pytestmark = pytest.mark.skipif(not _DB_AVAILABLE, reason="configured APE_DATABA
 
 @pytest.fixture
 def db_session():
+    from app.database.safety import assert_test_cleanup
+    assert_test_cleanup(_tmp_db_path, expected_database=f"sqlite:///{_tmp_db_path.as_posix()}")
     Base.metadata.create_all(bind=_engine)
     from sqlalchemy.orm import sessionmaker
 

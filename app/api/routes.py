@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.adapters.external_network_agent import ExternalFindingValidationError, to_findings, validate_external_findings
@@ -34,11 +35,37 @@ from app.core.config import settings
 from app.core.exceptions import AssessmentNotFoundError, ToolExecutionError
 from app.core.schemas import Assessment, AssessmentStatus, BinaryAsset, NetworkGraph
 from app.database import repository
+from app.database.models import AssessmentRecord, BinaryAssetRecord
 from app.orchestrator.graph import run_assessment
 from app.orchestrator.state import OrchestratorState
+from app.reporting.safety import public_output, report_directory, report_path
 
 logger = logging.getLogger("ape.api")
 router = APIRouter()
+
+
+@router.get("/assessments/{assessment_id}/vulnerability-lifecycle")
+def get_vulnerability_lifecycle(assessment_id: str, db: Session = Depends(get_db)) -> dict:
+    from app.database.vulnerability_lifecycle import assessment_lifecycles
+
+    repository.get_assessment(db, assessment_id)
+    return public_output({"assessment_id": assessment_id,
+                          "findings": assessment_lifecycles(db, assessment_id)})
+
+
+def _input_file(value: str, root: Path, label: str) -> Path:
+    """API inputs are files in configured input roots, never arbitrary server files."""
+    try:
+        candidate = Path(value).absolute()
+        base = Path(root).resolve()
+        if not candidate.is_relative_to(base):
+            raise ValueError("Outside input root")
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(base) or not resolved.is_file():
+            raise ValueError("Not an input file")
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(400, f"{label} must be an existing file inside its configured input folder") from exc
+    return resolved
 
 
 def _run_orchestrator_background(initial_state: OrchestratorState) -> None:
@@ -92,19 +119,28 @@ def create_assessment(
         raise HTTPException(400, str(exc)) from exc
 
     assessment_id = request.assessment_id or f"ASSESSMENT-{uuid.uuid4().hex[:10].upper()}"
+    try:
+        report_path(settings.reports_dir, assessment_id, "json")
+    except ValueError as exc:
+        raise HTTPException(422, "Assessment ID must be a safe filename identifier of at most 128 characters") from exc
+    if db.get(AssessmentRecord, assessment_id) is not None:
+        raise HTTPException(409, "An assessment with this ID already exists")
 
+    graph_path = str(_input_file(request.network_graph_path, settings.network_graph_dir, "Network graph")) if request.network_graph_path else None
     binary_entries: list[tuple[str, str]] = []
+    binary_assets = []
+    binary_ids = set()
     for item in request.binaries:
         binary_id = item.binary_id or f"BINARY-{uuid.uuid4().hex[:8].upper()}"
-        path = Path(item.file_path)
-        if not path.exists():
-            raise HTTPException(400, f"binary file not found: {item.file_path}")
+        if binary_id in binary_ids or db.get(BinaryAssetRecord, binary_id) is not None:
+            raise HTTPException(409, "Binary ID already exists; use a fresh identifier")
+        binary_ids.add(binary_id)
+        path = _input_file(item.file_path, settings.binaries_dir, "Binary")
         try:
             meta = identify_binary(path)
         except ToolExecutionError as exc:
             raise HTTPException(400, str(exc)) from exc
-        repository.store_binary_asset(
-            db,
+        binary_assets.append(
             BinaryAsset(
                 binary_id=binary_id, assessment_id=assessment_id, file_name=meta.file_name,
                 file_path=str(path), file_hash=meta.file_hash_sha256, format=meta.format, architecture=meta.architecture,
@@ -117,18 +153,24 @@ def create_assessment(
         scope_id=request.scope_id,
         status=AssessmentStatus.CREATED,
         assessment_policy=request.assessment_policy,
-        network_graph_ref=request.network_graph_path,
+        network_graph_ref=graph_path,
         binaries_ref=str(settings.binaries_dir) if binary_entries else None,
     )
-    repository.create_assessment(db, assessment)
-    db.commit()
+    try:
+        repository.create_assessment(db, assessment)
+        for binary in binary_assets:
+            repository.store_binary_asset(db, binary)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "Assessment or binary identifiers conflict with existing records") from exc
 
     if request.run_immediately:
         initial_state: OrchestratorState = {
             "assessment_id": assessment_id,
             "scope_id": request.scope_id,
             "policy": request.assessment_policy,
-            "network_graph_source_path": request.network_graph_path,
+            "network_graph_source_path": graph_path,
             "binary_paths": binary_entries,
             "external_network_findings_raw": [],
             "errors": [],
@@ -196,20 +238,40 @@ def get_agents(assessment_id: str, db: Session = Depends(get_db)) -> list[AgentT
 def get_report(
     assessment_id: str,
     format: str = Query(default="json", pattern="^(json|pdf)$"),
+    download: bool = Query(default=False),
+    source: str = Query(default="latest", pattern="^(latest|execution|snapshot)$"),
 ) -> ReportResponse | FileResponse:
-    json_path = Path(settings.reports_dir) / f"{assessment_id}_report.json"
-    pdf_path = Path(settings.reports_dir) / f"{assessment_id}_report.pdf"
+    try:
+        directory = report_directory(settings.reports_dir, assessment_id, source)
+        json_path = report_path(directory, assessment_id, "json")
+        pdf_path = report_path(directory, assessment_id, "pdf")
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid report identifier") from exc
 
     if format == "pdf":
-        if not pdf_path.exists():
+        if not pdf_path.is_file():
             raise HTTPException(404, "PDF report not yet generated for this assessment")
         return FileResponse(str(pdf_path), media_type="application/pdf", filename=pdf_path.name)
 
-    if not json_path.exists():
+    if not json_path.is_file():
         raise HTTPException(404, "report not yet generated for this assessment")
     import json as _json
 
-    return ReportResponse(assessment_id=assessment_id, json_report=_json.loads(json_path.read_text(encoding="utf-8")))
+    try:
+        data = _json.loads(json_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("assessment_id") != assessment_id:
+            raise ValueError("Report assessment does not match")
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, "Saved report is unreadable or does not match this assessment") from exc
+    data = public_output(data)
+    if download:
+        from fastapi.responses import Response
+
+        return Response(_json.dumps(data, indent=2), media_type="application/json", headers={
+            "Content-Disposition": f'attachment; filename="{json_path.name}"',
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        })
+    return ReportResponse(assessment_id=assessment_id, json_report=data)
 
 
 @router.post("/assessments/{assessment_id}/external-findings", response_model=ExternalFindingsResponse)

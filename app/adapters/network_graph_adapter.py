@@ -278,6 +278,16 @@ def _coerce_probe_port(ip: str, raw_port: dict[str, Any]) -> NetworkGraphService
     except (TypeError, ValueError) as exc:
         raise GraphValidationError(f"Probe host {ip!r} port is not an integer: {port!r}") from exc
     proto = str(raw_port.get("proto", "tcp"))
+    raw_observations = raw_port.get("observations") or raw_port.get("scripts") or {}
+    if isinstance(raw_observations, str):
+        try:
+            raw_observations = json.loads(raw_observations)
+        except json.JSONDecodeError:
+            # Preserve neither an unstructured blob nor an invented interpretation.  The
+            # specialist can still work from the service/banner fields.
+            raw_observations = {}
+    if not isinstance(raw_observations, dict):
+        raw_observations = {}
     return NetworkGraphServiceRecord(
         service_id=f"{ip}:{port}/{proto}",
         asset_id=ip,
@@ -287,6 +297,7 @@ def _coerce_probe_port(ip: str, raw_port: dict[str, Any]) -> NetworkGraphService
         version=raw_port.get("version"),
         product=raw_port.get("product"),
         banner=raw_port.get("banner"),
+        probe_observations=raw_observations,
     )
 
 
@@ -301,6 +312,9 @@ def _coerce_probe_host(raw_host: dict[str, Any]) -> NetworkGraphAssetRecord:
         raise GraphValidationError(f"Probe host {ip!r}: open_ports is not a list")
     services = [_coerce_probe_port(ip, p) for p in raw_ports]
 
+    raw_roles = raw_host.get("roles") or []
+    if not isinstance(raw_roles, list):
+        raw_roles = []
     return NetworkGraphAssetRecord(
         asset_id=ip,
         ip=ip,
@@ -309,6 +323,7 @@ def _coerce_probe_host(raw_host: dict[str, Any]) -> NetworkGraphAssetRecord:
         services=services,
         held=bool(raw_host.get("held", False)),
         verdict=raw_host.get("verdict"),
+        probe_roles=[role for role in raw_roles if isinstance(role, str)],
     )
 
 

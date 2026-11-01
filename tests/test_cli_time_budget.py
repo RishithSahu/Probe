@@ -25,7 +25,7 @@ def assessment(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "evidence_dir", tmp_path / "evidence")
     init_db()
     assessment_id = f"ASSESSMENT-TIMEBUDGET-{uuid.uuid4().hex[:8]}"
-    graph = NetworkGraph(scope_id="SCOPE-TEST", assets=[NetworkGraphAssetRecord(
+    graph = NetworkGraph(scope_id="SCOPE-10.0.0.0-24", assets=[NetworkGraphAssetRecord(
         asset_id="HOST-1", ip="10.0.0.1",
         services=[NetworkGraphServiceRecord(service_id="HOST-1:22/tcp", asset_id="HOST-1", port=22, service_name="ssh")],
     )])

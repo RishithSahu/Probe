@@ -1,5 +1,15 @@
 # Autonomous Pentest Engine
 
+Assessment reports distinguish a finished worker from a proven finding and from
+complete discovery. Network findings are checked against captured protocol
+evidence; health responses and open TCP connections do not imply unrestricted
+access. Unsupported, limited, and budget-deferred service checks remain explicit.
+
+Report JSON includes `great_readiness` for the documented quality targets.
+Unknown coverage or false-alarm rates stay unknown, and a partial scan's timing
+or one tool's scope audit cannot qualify the full assessment. Independent labels
+are optional for later scoring and are never required to run discovery.
+
 An autonomous, multi-agent security assessment platform for an explicitly
 authorised engagement. A LangGraph Orchestrator coordinates specialist
 assessment agents against a network inventory the Network Discovery Probe
@@ -154,6 +164,32 @@ supplied, `POST /assessments` automatically pulls the live inventory from
 Probe; see "Held-segment safety" below for what it will and won't offer as
 an assessment target.
 
+### Assessment website
+
+Start the existing app with `uvicorn app.main:app --host 127.0.0.1 --port 8000`
+and open `http://127.0.0.1:8000/`. The website shows assessment history,
+agent activity, searchable device/service inventory, findings with evidence,
+observed relationships and PDF/JSON downloads. Opening it does not start a scan.
+For autonomous runs that have saved findings but no report, use **Generate snapshot
+report**. This reads persisted records without rerunning agents, preserves the
+original execution report, and leaves missing tool/audit measurements unknown.
+The report API defaults to the latest saved version; `source=execution` and
+`source=snapshot` select a specific source.
+New assessments default to dry run and require an existing scope ID; the form
+does not enable authentication or expand discovery permissions. The existing
+API at `/docs` remains available for advanced policy settings.
+File inputs submitted through the API must be inside the configured
+`APE_NETWORK_GRAPH_DIR` (inventory JSON) or `APE_BINARIES_DIR` (binaries).
+Directories and symlinks escaping those folders are rejected. Binary identifiers
+cannot be reused across assessments; a fresh assessment receives separate records.
+
+To inspect the UI and report layout without the challenge network, run
+`python scripts/preview_workspace.py --serve` and open
+`http://127.0.0.1:8765/#OFFLINE-WORKSPACE-QA`. This creates clearly labelled
+synthetic data in a separate database under `output/workspace-preview/`.
+It runs no agents and performs no discovery. Its local readiness panel does
+not verify remote workers, independent egress enforcement or live connectivity.
+
 ### Running the synthetic end-to-end demo
 
 Not run automatically — this was deliberately left for you to run
@@ -173,7 +209,7 @@ installed) — no external network access, no Probe instance required.
 ### Running the test suite
 
 ```bash
-pip install -r requirements.txt -r requirements-probe.txt   # the second file is needed to collect probe/'s own tests
+pip install -r requirements-dev.txt -r requirements-probe.txt   # includes test tools and Probe dependencies
 python -m pytest tests/ -q
 ```
 

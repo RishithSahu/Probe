@@ -10,6 +10,8 @@ touching the PDF layout code.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,16 +23,15 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
-    Table,
     TableStyle,
 )
 
 from app.adapters.discovery_snapshot import read_snapshot
+from app.analysis.great_readiness import evaluate_great
 from app.analysis.ptes_mapper import summarise_activities
 from app.core.exceptions import GraphValidationError
 from app.core.schemas import AgentResult, PtesPhase, TaskStatus
@@ -40,9 +41,11 @@ from app.reporting.pdf_sections import (
     coverage_section,
     evidence_section,
     inventory_section,
+    measurement_section,
     table,
     text,
 )
+from app.reporting.safety import public_output, report_path
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _jinja_env = Environment(
@@ -152,6 +155,7 @@ def _build_report_data(state: dict) -> dict[str, Any]:
     if ptes_summary.get("unmapped_activities"):
         incomplete_tasks.append(f"PTES phase is unresolved for {len(ptes_summary['unmapped_activities'])} activity record(s)")
     incomplete_tasks.extend(discovery_provenance.get("import_limitations", []))
+    incomplete_tasks.extend(state.get("report_limitations", []))
     if not state.get("network_agent_findings"):
         incomplete_tasks.append("External Network Vulnerability Agent: no results ingested for this run")
 
@@ -168,7 +172,11 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         for te in result.tool_executions:
             if te.get("used_fixture"):
                 fixture_tools_used.add(te.get("tool", "unknown"))
+    for item in evidence:
+        if (item.raw_data or {}).get("used_fixture") is True:
+            fixture_tools_used.add(item.source_tool)
     fixture_tools_used = sorted(fixture_tools_used)
+    tool_history_available = state.get("report_source", {}).get("tool_execution_history_available", True)
 
     policy = state.get("policy")
     policy_dict = policy.model_dump(mode="json") if policy else {}
@@ -191,7 +199,7 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         active_scan_enabled=policy_dict.get("allow_active_web_verification", False),
     )
 
-    return {
+    report_data = {
         "schema_version": "1.0.0",
         "generated_at": datetime.now(UTC).isoformat(),
         "assessment_id": assessment_id,
@@ -208,25 +216,53 @@ def _build_report_data(state: dict) -> dict[str, Any]:
         },
         "evidence": [e.model_dump(mode="json") for e in evidence],
         "evidence_validation": validation_report,
+        "vulnerability_lifecycles": state.get("vulnerability_lifecycles", []),
         "attack_paths": attack_path_edges,
         "ptes_mapping": ptes_summary,
         "incomplete_tasks_and_limitations": incomplete_tasks,
         "agent_execution_summary": agent_execution_summary,
         "assessment_coverage": coverage,
         "discovery_provenance": discovery_provenance,
+        "execution_metrics": state.get("execution_metrics", {}),
+        "scope_audit": state.get("scope_audit", {}),
+        "task_ledger": state.get("task_ledger", []),
+        "report_source": state.get("report_source", {"kind": "execution_state"}),
         # See the fixture_tools_used comment above `exec_summary` — this is
         # the authoritative, machine-readable form of that warning. A
         # non-empty list means at least one tool's findings in this report
         # are synthetic fixture data, not real scan results.
         "data_integrity": {
             "fixture_tools_used": fixture_tools_used,
-            "contains_synthetic_data": bool(fixture_tools_used),
+            "contains_synthetic_data": True if fixture_tools_used else (False if tool_history_available else None),
+            "tool_execution_history_available": tool_history_available,
         },
     }
+    try:
+        report_data["great_readiness"] = evaluate_great(report_data, state.get("benchmark_comparison"))
+    except ValueError:
+        report_data["great_readiness"] = evaluate_great(report_data)
+        report_data["great_readiness"]["comparison_error"] = "Optional comparison does not match this assessment/scope"
+        incomplete_tasks.append("Optional scoring comparison rejected; assessment/scope binding did not match")
+    return public_output(report_data)
 
 
 def write_json_report(report_data: dict[str, Any], output_path: Path) -> Path:
-    output_path.write_text(json.dumps(report_data, indent=2, default=str), encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent,
+                                     prefix=".report-", suffix=".json", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(public_output(report_data), stream, indent=2, default=str)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            stream.close()
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return output_path
 
 
@@ -239,13 +275,27 @@ def _severity_badge_style(severity: str) -> ParagraphStyle:
 
 
 def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
+    report_data = public_output(report_data)
     styles = getSampleStyleSheet()
+    for style in styles.byName.values():
+        style.splitLongWords = True
+    styles["Normal"].fontSize = 9
+    styles["Normal"].leading = 13
+    styles["BodyText"].fontSize = 8
+    styles["BodyText"].leading = 11
+    for name in ("Heading1", "Heading2", "Heading3"):
+        styles[name].keepWithNext = True
     doc = SimpleDocTemplate(str(output_path), pagesize=A4, topMargin=2 * cm, bottomMargin=2 * cm)
     story = []
 
     story.append(Paragraph("Autonomous Security Assessment Report", styles["Title"]))
     story.append(Paragraph(f"Assessment {text(report_data['assessment_id'])} &middot; Scope {text(report_data['scope_id'])}", styles["Normal"]))
-    story.append(Paragraph(f"Generated {report_data['generated_at']}", styles["Normal"]))
+    story.append(Paragraph(f"Generated {text(report_data['generated_at'])}", styles["Normal"]))
+    coverage = report_data.get("assessment_coverage", {})
+    story.append(Paragraph(
+        f"<b>Coverage: {text(coverage.get('overall', 'unknown'))}</b> &middot; "
+        f"Discovery: {text(coverage.get('discovery_status', 'unknown'))}", styles["Normal"],
+    ))
     story.append(Spacer(1, 0.5 * cm))
 
     fixture_tools = report_data.get("data_integrity", {}).get("fixture_tools_used", [])
@@ -263,7 +313,10 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
         story.append(Spacer(1, 0.5 * cm))
 
     story.append(Paragraph("Executive Summary", styles["Heading1"]))
-    for para in report_data["executive_summary"].split("\n\n"):
+    executive_summary = report_data["executive_summary"]
+    if fixture_tools and executive_summary.startswith("*** DATA INTEGRITY WARNING ***"):
+        executive_summary = executive_summary.split("\n\n", 1)[-1]
+    for para in executive_summary.split("\n\n"):
         if para.strip():
             story.append(Paragraph(text(para.strip()), styles["Normal"]))
             story.append(Spacer(1, 0.2 * cm))
@@ -271,9 +324,11 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
     story.append(Paragraph("Assessment Scope", styles["Heading1"]))
     policy = report_data["authorised_scope"]
     scope_rows = [["Permission", "Enabled"]] + [
-        [k, "Yes" if v else "No"] for k, v in policy.items() if isinstance(v, bool)
+        [k.replace("_", " ").capitalize(), "Yes" if v else "No"] for k, v in policy.items() if isinstance(v, bool)
     ]
-    story.append(Table(scope_rows, style=_table_style()))
+    story.append(table(scope_rows[0], scope_rows[1:], styles, doc.width))
+    for field, label in (("approved_asset_ids", "Approved asset IDs"), ("approved_web_origins", "Approved web origins")):
+        story.append(Paragraph(f"{label}: {text(', '.join(policy.get(field, [])) or 'None explicitly listed')}", styles["Normal"]))
     story.append(Spacer(1, 0.3 * cm))
 
     story.append(Paragraph("Methodology", styles["Heading1"]))
@@ -283,18 +338,19 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
             story.append(Spacer(1, 0.2 * cm))
 
     story.extend(coverage_section(report_data, styles))
+    story.extend(measurement_section(report_data, styles, doc.width))
     story.extend(inventory_section(report_data, styles, doc.width))
     story.append(PageBreak())
     story.append(Paragraph("Findings Summary", styles["Heading1"]))
     summary = report_data["findings_summary"]
     story.append(Paragraph(f"Total findings: {summary['total']}", styles["Normal"]))
     status_rows = [["Status", "Count"]] + [[k, str(v)] for k, v in summary["by_status"].items()]
-    story.append(Table(status_rows, style=_table_style()))
+    story.append(table(status_rows[0], status_rows[1:], styles, doc.width))
     story.append(Spacer(1, 0.3 * cm))
     severity_rows = [["Severity", "Count"]] + [
         [sev, str(summary["by_severity"].get(sev, 0))] for sev in _SEVERITY_ORDER if summary["by_severity"].get(sev, 0)
     ]
-    story.append(Table(severity_rows, style=_table_style()))
+    story.append(table(severity_rows[0], severity_rows[1:], styles, doc.width))
     for label, key in (("Network Findings", "network"), ("Web Security Findings", "web"), ("Binary Analysis Findings", "binary")):
         if not report_data["findings_by_surface"].get(key):
             story.append(Paragraph(f"{label}: no findings recorded.", styles["Normal"]))
@@ -303,7 +359,6 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
         findings = report_data["findings_by_surface"].get(surface_key, [])
         if not findings:
             continue
-        story.append(PageBreak())
         story.append(Paragraph(surface_label, styles["Heading1"]))
         for f in findings:
             group = [Paragraph(text(f"{f['title']}  [{f['severity'].upper()} / {f['status'].upper()}]"), styles["Heading3"]),
@@ -311,12 +366,20 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
                      Paragraph(text(f.get("description", "")), styles["Normal"])]
             if f.get("remediation"):
                 group.append(Paragraph(f"Remediation: {text(f['remediation'])}", styles["Normal"]))
+            target = f.get("asset_id") or f.get("binary_id") or "not recorded"
+            group.append(Paragraph(
+                f"Finding: {text(f.get('finding_id'))} &middot; Target: {text(target)}<br/>"
+                f"Service: {text(f.get('service_id') or 'not recorded')} &middot; "
+                f"Confidence: {text(f.get('confidence', 'unknown'))}<br/>"
+                f"Location: {text(f.get('affected_url') or f.get('function_name') or f.get('function_address') or 'not recorded')}",
+                styles["Normal"],
+            ))
             group.append(Paragraph(f"PTES phase: {text(f.get('ptes_phase', 'n/a'))} &middot; Evidence: {text(', '.join(f.get('evidence_refs', [])) or 'none')}", styles["Normal"]))
-            story.append(KeepTogether(group))
+            story.extend(group)
+            story.append(Spacer(1, 10))
 
     story.extend(attack_paths_section(report_data, styles))
     story.extend(evidence_section(report_data, styles))
-    story.append(PageBreak())
     story.append(Paragraph("PTES Mapping", styles["Heading1"]))
     ptes = report_data.get("ptes_mapping", {})
     ptes_rows = []
@@ -334,7 +397,6 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
         for activity in ptes.get(key, []):
             story.append(Paragraph(f"{label}: {text(activity)}", styles["Normal"]))
 
-    story.append(PageBreak())
     story.append(Paragraph("Incomplete Tasks and Limitations", styles["Heading1"]))
     limitations = report_data.get("incomplete_tasks_and_limitations", [])
     if limitations:
@@ -347,6 +409,7 @@ def write_pdf_report(report_data: dict[str, Any], output_path: Path) -> Path:
         canvas.saveState()
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.HexColor("#64748b"))
+        canvas.drawString(document.leftMargin, 20, str(report_data["assessment_id"])[:65])
         canvas.drawRightString(document.pagesize[0] - document.rightMargin, 20, f"Page {document.page}")
         canvas.restoreState()
 
@@ -366,12 +429,19 @@ def _table_style() -> TableStyle:
 
 def generate_reports(state: dict, *, output_dir: Path) -> tuple[Path, Path]:
     assessment_id = state["assessment_id"]
+    json_path = report_path(output_dir, assessment_id, "json")
+    pdf_path = report_path(output_dir, assessment_id, "pdf")
     report_data = _build_report_data(state)
-
-    json_path = output_dir / f"{assessment_id}_report.json"
-    pdf_path = output_dir / f"{assessment_id}_report.pdf"
-
-    write_json_report(report_data, json_path)
-    write_pdf_report(report_data, pdf_path)
+    output_dir = json_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Finish both artifacts before publishing either. Each replacement is atomic;
+    # no partial PDF/JSON is served if rendering fails. This is not a two-file DB transaction.
+    with tempfile.TemporaryDirectory(prefix=".report-build-", dir=output_dir) as temporary:
+        staged_json = Path(temporary) / json_path.name
+        staged_pdf = Path(temporary) / pdf_path.name
+        write_json_report(report_data, staged_json)
+        write_pdf_report(report_data, staged_pdf)
+        os.replace(staged_pdf, pdf_path)
+        os.replace(staged_json, json_path)
 
     return json_path, pdf_path

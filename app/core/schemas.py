@@ -492,6 +492,11 @@ class NetworkGraphServiceRecord(BaseModel):
     version: str | None = None
     product: str | None = Field(default=None, description="From Probe's nmap-derived service.product, when available.")
     banner: str | None = Field(default=None, description="Raw banner text, when Probe captured one.")
+    probe_observations: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Read-only, service-scoped observations supplied by Probe (for example an HTTP inventory). "
+        "They justify prioritising a specialist assessment; they are not vulnerability findings.",
+    )
 
 
 class NetworkGraphAssetRecord(BaseModel):
@@ -508,6 +513,10 @@ class NetworkGraphAssetRecord(BaseModel):
     )
     verdict: str | None = Field(
         default=None, description="Probe's reachability verdict (e.g. CONFIRMED_ONLINK), when sourced from Probe."
+    )
+    probe_roles: list[str] = Field(
+        default_factory=list,
+        description="Probe-observed network roles such as forwarder. This is routing context, not a claim of compromise.",
     )
 
 

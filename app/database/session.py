@@ -11,14 +11,34 @@ here beyond the extra `connect_args` below, which only apply to SQLite.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+from app.database import vulnerability_lifecycle  # noqa: F401 -- register lifecycle tables
 from app.database.models import Base
+
+
+def _assert_safe_database_url(database_url: str) -> None:
+    """Fail closed, at import time, rather than silently sharing (and risking) the production database.
+
+    INCIDENT (2026-11-01): tests/conftest.py used to delete evidence/ape.db -- the real, live database --
+    at the start of every pytest session. conftest.py now redirects every writable path via environment
+    variables BEFORE this module is ever imported (see its own top-of-file comment), which is the actual
+    fix; this is the second, independent layer -- it does not trust that redirection happened and checks
+    the resolved path itself. `"pytest" in sys.modules` is used rather than `PYTEST_CURRENT_TEST` (which
+    the project's own incident review confirmed is not necessarily set yet during test collection, only
+    once a specific test is running) -- pytest itself is already imported by the time ANY test module,
+    including this one's importer, runs, so this is reliable at the point this function is actually called
+    (module import time, i.e. first `import app.database.session` anywhere in the process)."""
+    from app.database.safety import validate_engine_url
+    validate_engine_url(database_url)
+
+
+_assert_safe_database_url(settings.database_url)
 
 _is_sqlite = settings.database_url.startswith("sqlite")
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}

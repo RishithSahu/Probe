@@ -86,6 +86,29 @@ def test_a_real_weakness_outranks_a_service_with_only_cosmetic_findings():
     assert explanation["selected"]["factors"]["weakness_depth"] == 1.0
 
 
+def test_probe_observed_service_outranks_blind_port_enumeration():
+    """A rich Probe observation is evidence for *where to look next*, not
+    proof of a vulnerability.  It should still beat arbitrary port order so
+    the right specialist sees it within a bounded run."""
+    graph = NetworkGraph(scope_id="SCOPE-TEST", assets=[NetworkGraphAssetRecord(
+        asset_id="HOST-A", ip="10.0.0.1", probe_roles=["forwarder"],
+        services=[
+            NetworkGraphServiceRecord(service_id="HOST-A:80/tcp", asset_id="HOST-A", port=80,
+                                      service_name="http", probe_observations={
+                                          "probe-http-metadata": '{"resources": [{}, {}, {}]}'
+                                      }),
+            NetworkGraphServiceRecord(service_id="HOST-A:8080/tcp", asset_id="HOST-A", port=8080,
+                                      service_name="http"),
+        ],
+    )])
+    candidates = generate_candidates(graph, [], [], guard=_guard(graph))
+    winner, explanation = select_next(candidates)
+    assert winner.service_id == "HOST-A:80/tcp"
+    assert winner.source == "probe_observed_service"
+    assert "specialist assessment" in winner.note
+    assert explanation["selected"]["factors"]["weakness_depth"] == 0.3
+
+
 def test_scopeguard_rejection_cannot_be_overridden_by_priority():
     graph = _graph(("HOST-A:80/tcp", 80, "http"))
     findings = [_finding("HOST-A:80/tcp", confidence=Confidence.HIGH)]  # would otherwise win easily
@@ -141,7 +164,8 @@ def test_an_unproductive_repeat_of_the_same_evidence_does_not_loop_forever():
     stay at full novelty forever (it would otherwise always win and starve every other candidate)."""
     graph = _graph(("HOST-A:8833/tcp", 8833, "unknown"))
     finding = _finding("HOST-A:8833/tcp", confidence=Confidence.HIGH)
-    prior_attempt = [{"asset_id": "HOST-A", "service_id": "HOST-A:8833/tcp", "finding_count_at_dispatch": 1}]
+    prior_attempt = [{"asset_id": "HOST-A", "service_id": "HOST-A:8833/tcp", "finding_count_at_dispatch": 1,
+                      "finding_ids_at_dispatch": [finding.finding_id]}]
     candidates = generate_candidates(graph, prior_attempt, [finding], guard=_guard(graph))
     assert candidates[0].factors["novelty"] < 1.0, "repeating the same evidence with no new findings must decay"
 

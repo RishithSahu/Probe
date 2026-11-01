@@ -23,7 +23,6 @@ import threading
 import time
 from pathlib import Path
 
-from . import selftest
 from .killswitch import KillSwitch, TripwireLatched
 from .scope import ScopeGuard, ScopeViolation
 from .territory import Territory, TerritoryError, require_in_territory, sane_scope
@@ -80,6 +79,8 @@ def _ensure_privileges() -> None:
     """Raw packets need admin/root. Ask for it ourselves instead of failing."""
     if _is_admin():
         return
+    if "--managed" in sys.argv:
+        sys.exit("Managed Probe cannot relaunch an unsupervised elevated child; start the parent elevated")
     if os.name == "nt":
         import ctypes
         params = " ".join(f'"{a}"' for a in ["-m", "probe", *sys.argv[1:]])
@@ -111,6 +112,7 @@ def _plan(args) -> int:
 
 
 def _selftest(args) -> int:
+    from . import selftest
     failures = selftest.run(resolve_scope(args))
     for f in failures:
         print("FAIL:", f)
@@ -211,6 +213,13 @@ def reset_scan_inventory(store, grant) -> None:
 
 
 def _run(args) -> int:
+    if args.snapshot_output and (not args.once or not args.assessment_id or not args.instance_id):
+        raise ValueError("Snapshot export requires --once, --assessment-id and --instance-id")
+    if args.snapshot_output and Path(args.snapshot_output).exists():
+        raise ValueError("Snapshot already exists; import it rather than rerunning discovery")
+    if args.no_api and not args.once:
+        raise ValueError("--no-api requires --once")
+    from . import selftest
     startup_t0 = time.monotonic()
     scope_cidrs = resolve_scope(args)
     problems = sane_scope(scope_cidrs, allow_wide=args.allow_wide)
@@ -342,10 +351,10 @@ def _run(args) -> int:
         rescan.set()
         return {"state": "started", "scan": last}
 
-    if not args.no_ui:
+    if not args.no_api:
         import uvicorn
         from .web.app import create_app
-        cfg = uvicorn.Config(create_app(store, scope, request_scan, orch), host="127.0.0.1", port=args.port, log_level="warning")
+        cfg = uvicorn.Config(create_app(store, scope, request_scan, orch, dashboard=not args.no_ui), host="127.0.0.1", port=args.port, log_level="warning")
         threading.Thread(target=uvicorn.Server(cfg).run, daemon=True).start()
         print(f"web view + API: http://127.0.0.1:{args.port}   (API docs: /api/docs)")
 
@@ -369,6 +378,10 @@ def _run(args) -> int:
 
     try:
         do_scan()
+        if args.snapshot_output:
+            from .snapshot import export_snapshot
+            export_snapshot(store, args.snapshot_output, assessment_id=args.assessment_id,
+                            instance_id=args.instance_id, scope=scope_cidrs)
         if not args.once:
             print("scan complete; serving the API (POST /api/scan to rescan, Ctrl-C to quit)")
             while True:
@@ -376,9 +389,15 @@ def _run(args) -> int:
                 rescan.clear()
                 do_scan()
     except KeyboardInterrupt:
-        pass
-    if aud:
-        aud.terminate()
+        return 130
+    finally:
+        if aud:
+            aud.terminate()
+            try:
+                aud.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                aud.kill()
+                aud.wait(timeout=5)
     return 0
 
 
@@ -412,6 +431,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Discovery Completeness Manager: maximum number of adaptive follow-up rounds (default 6)")
     r.add_argument("--port", type=int, default=8080)
     r.add_argument("--no-ui", action="store_true")
+    r.add_argument("--no-api", action="store_true", help="disable HTTP API explicitly")
+    r.add_argument("--managed", action="store_true", help="never detach into an elevated child")
+    r.add_argument("--snapshot-output", help="atomic inventory export after the initial scan")
+    r.add_argument("--assessment-id")
+    r.add_argument("--instance-id")
     r.add_argument("--data-dir", default="probe-data", help="isolated results and audit directory")
     r.add_argument("--authorisations", default="authorisations.json", help="explicit range-specific discovery grants")
     r.add_argument("--no-auditor", action="store_true", help="NOT recommended: skip the independent egress auditor")

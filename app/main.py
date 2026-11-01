@@ -7,9 +7,12 @@ equivalent).
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
+from app.api.dashboard import router as dashboard_router
 from app.api.routes import router
 from app.core.config import settings
 from app.database.session import init_db
@@ -26,6 +29,8 @@ app = FastAPI(
     version="0.1.0",
 )
 app.include_router(router)
+app.include_router(dashboard_router)
+app.mount("/ui-static", StaticFiles(directory=Path(__file__).parent / "api" / "static"), name="ui-static")
 
 
 @app.on_event("startup")
