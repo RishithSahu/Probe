@@ -22,6 +22,7 @@ from app.core.scope_guard import ScopeGuard
 from app.database import repository
 from app.database.session import session_scope
 from app.orchestrator.scheduler import Candidate, generate_candidates, rank_candidates, select_next
+from app.orchestrator.task_ids import make_task_id
 
 logger = logging.getLogger("ape.orchestrator.autonomous_loop")
 
@@ -46,16 +47,22 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _task_id_for(assessment_id: str, objective: Candidate) -> str:
+def _task_id_for(assessment_id: str, objective: Candidate) -> tuple[str, str]:
     """The candidate's deterministic fingerprint (item 3): assessment + agent/surface + target/service,
     exactly the fields that make two dispatches "the same unit of work" for this scheduler today. It is
     deliberately NOT attempt-scoped -- see try_reserve_task's own docstring for why that is correct, not
     an oversight: a fresh attempt justified by new evidence reclaims this same id rather than minting a new
-    one, so the task's history stays one row per candidate instead of growing one per retry forever."""
-    return f"TASK-autonomous-{objective.agent_id.value}-{assessment_id}-{objective.service_id}"
+    one, so the task's history stays one row per candidate instead of growing one per retry forever.
+
+    Returns (task_id, fingerprint): task_id is a bounded hash (app.orchestrator.task_ids.make_task_id) --
+    the raw concatenation used to exceed the task_id column's String(64) limit with real-length inputs
+    (e.g. a long assessment_id + a "host:port/tcp" service_id) -- fingerprint is the original readable
+    string, kept on the task row for logs/dedup display."""
+    return make_task_id("autonomous", objective.agent_id.value, assessment_id, objective.service_id)
 
 
-def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task_id: str | None, explanation: dict) -> str | None:
+def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task_id: str | None, explanation: dict,
+            *, task_fingerprint: str | None = None) -> str | None:
     """Atomically claim `task_id` for this caller (see repository.try_reserve_task) and, iff that succeeds,
     log the dispatch -- so an unsuccessful reservation never produces a log line claiming a dispatch that
     didn't actually happen. Returns the fresh reservation_token on success (the caller must present it back
@@ -69,7 +76,7 @@ def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task
                    "finding_count_at_dispatch": objective.backing_findings_count,
                    "attempt_count": objective.next_attempt_count},
         output_data={"selection": explanation},
-        status=TaskStatus.RUNNING, started_at=_now(),
+        status=TaskStatus.RUNNING, started_at=_now(), task_fingerprint=task_fingerprint,
     )
     # allow_reclaim=True only when the candidate's OWN generation already positively decided this is a
     # retry (next_attempt_count > 1 means generate_candidates saw a prior, finished attempt and a reason
@@ -90,7 +97,7 @@ def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task
 def _execute_objective(
     assessment_id: str, objective: Candidate, task_id: str, reservation_token: str, parent_task_id: str | None, *,
     policy: AssessmentPolicy, guard: ScopeGuard, graph: NetworkGraph, output_dir: Path, explanation: dict,
-    method_prefix: str = EXECUTION_METHOD,
+    method_prefix: str = EXECUTION_METHOD, task_fingerprint: str | None = None,
 ) -> IterationTrace:
     """Run the already-reserved `objective` to completion and persist the result. Safe to call from a
     worker thread: everything it touches is either a value passed in (its own `guard`, built fresh per
@@ -123,7 +130,7 @@ def _execute_objective(
             accepted = repository.try_complete_task(
                 db, task_id, reservation_token,
                 status=TaskStatus.FAILED.value, error_message=str(exc)[:2000], completed_at=_now(),
-                execution_method=method, output_data={"selection": explanation},
+                execution_method=method, output_data={"selection": explanation}, task_fingerprint=task_fingerprint,
             )
         if not accepted:
             logger.warning("task %s: stale reservation_token on failure write -- a retry already reclaimed it", task_id)
@@ -175,7 +182,7 @@ def _execute_objective(
             evidence_ids=[e.evidence_id for e in result.evidence],
             verification_status=verification_status,
             status=task_status.value,
-            error_message="; ".join(result.errors) or None, completed_at=_now(),
+            error_message="; ".join(result.errors) or None, completed_at=_now(), task_fingerprint=task_fingerprint,
         )
         if accepted:
             repository.log_event(
@@ -217,8 +224,8 @@ def run_next_iteration(
                               blocked_reason="no justified next action: " + explanation.get("reason", "queue empty"),
                               selection_explanation=explanation)
 
-    task_id = _task_id_for(assessment_id, objective)
-    reservation_token = _reserve(assessment_id, objective, task_id, parent_task_id, explanation)
+    task_id, task_fingerprint = _task_id_for(assessment_id, objective)
+    reservation_token = _reserve(assessment_id, objective, task_id, parent_task_id, explanation, task_fingerprint=task_fingerprint)
     if not reservation_token:
         # Lost the reservation race (another dispatcher -- another thread of a concurrent run, or a
         # separate process against a shared database -- already has this exact candidate RUNNING right
@@ -230,7 +237,8 @@ def run_next_iteration(
                               selection_explanation=explanation)
 
     return _execute_objective(assessment_id, objective, task_id, reservation_token, parent_task_id, policy=policy,
-                              guard=guard, graph=graph, output_dir=output_dir, explanation=explanation)
+                              guard=guard, graph=graph, output_dir=output_dir, explanation=explanation,
+                              task_fingerprint=task_fingerprint)
 
 
 def _surface_caps() -> dict[str, int]:
@@ -293,7 +301,7 @@ def run_concurrent_iteration(
     explanation_for = {c.candidate_id: {"selected": c.explanation(), "considered": [c.explanation() for c in ranked]}
                        for c in ranked}
     surface_caps = _surface_caps()
-    reserved: list[tuple[Candidate, str, str]] = []
+    reserved: list[tuple[Candidate, str, str, str]] = []
     reserved_assets: set[str] = set()
     for c in ranked:
         if len(reserved) >= max(1, max_inflight):
@@ -303,10 +311,10 @@ def run_concurrent_iteration(
             continue  # this surface's pool is already full -- try the next candidate, maybe a different surface
         if c.asset_id in reserved_assets:
             continue  # don't send two agents at the same target together in one dispatch
-        task_id = _task_id_for(assessment_id, c)
-        token = _reserve(assessment_id, c, task_id, parent_task_id, explanation_for[c.candidate_id])
+        task_id, task_fingerprint = _task_id_for(assessment_id, c)
+        token = _reserve(assessment_id, c, task_id, parent_task_id, explanation_for[c.candidate_id], task_fingerprint=task_fingerprint)
         if token:
-            reserved.append((c, task_id, token))
+            reserved.append((c, task_id, token, task_fingerprint))
             running_by_agent[c.agent_id.value] = running_by_agent.get(c.agent_id.value, 0) + 1
             reserved_assets.add(c.asset_id)
 
@@ -318,16 +326,17 @@ def run_concurrent_iteration(
             selection_explanation={"considered": [c.explanation() for c in ranked]},
         )]
 
-    def _run(objective: Candidate, task_id: str, token: str) -> IterationTrace:
+    def _run(objective: Candidate, task_id: str, token: str, task_fingerprint: str) -> IterationTrace:
         return _execute_objective(
             assessment_id, objective, task_id, token, parent_task_id, policy=policy, guard=ScopeGuard(policy, graph),
             graph=graph, output_dir=output_dir, explanation=explanation_for[objective.candidate_id],
-            method_prefix=CONCURRENT_EXECUTION_METHOD,
+            method_prefix=CONCURRENT_EXECUTION_METHOD, task_fingerprint=task_fingerprint,
         )
 
     traces: list[IterationTrace] = []
     with ThreadPoolExecutor(max_workers=len(reserved)) as pool:
-        futures = [pool.submit(_run, objective, task_id, token) for objective, task_id, token in reserved]
+        futures = [pool.submit(_run, objective, task_id, token, task_fingerprint)
+                  for objective, task_id, token, task_fingerprint in reserved]
         for future in as_completed(futures):
             traces.append(future.result())
     return traces

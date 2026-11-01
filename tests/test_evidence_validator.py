@@ -39,6 +39,7 @@ def _finding(**overrides) -> Finding:
         status=FindingStatus.SUSPECTED,
         evidence_refs=[],
         ptes_phase=PtesPhase.VULNERABILITY_ANALYSIS,
+        affected_url="http://example.test/",
     )
     defaults.update(overrides)
     return Finding(**defaults)
@@ -48,7 +49,7 @@ def _evidence(evidence_id: str, finding_id: str) -> Evidence:
     return Evidence(
         evidence_id=evidence_id, finding_id=finding_id, evidence_type="http_response",
         source_tool="httpx", description="test evidence",
-        raw_data={"headers": {}, "missing": ["x-frame-options"]},
+        raw_data={"headers": {}, "missing": ["x-frame-options"], "url": "http://example.test/", "status_code": 200},
     )
 
 
@@ -117,13 +118,40 @@ def test_run_evidence_validation_does_not_raise_on_empty_input():
     assert report.total_findings == 0
 
 
+def test_three_findings_from_one_batch_can_land_in_three_different_verification_states():
+    """Item 7's core acceptance criterion: one task's findings must be able to carry three different
+    verification outcomes -- a task-level status must never stand in for per-finding verification."""
+    verified = _finding(
+        finding_id="WEB-VERIFIED", detection_method="httpx_cookie_analysis",
+        confidence=Confidence.HIGH, evidence_refs=["EVIDENCE-VERIFIED"],
+    )
+    ev_verified = _evidence("EVIDENCE-VERIFIED", "WEB-VERIFIED")
+    ev_verified.raw_data = {"name": "session", "secure": False, "httponly": True, "url": "http://example.test/", "status_code": 200}
+
+    unverified = _finding(finding_id="WEB-UNVERIFIED", confidence=Confidence.LOW, evidence_refs=["EVIDENCE-UNVERIFIED"])
+    ev_unverified = _evidence("EVIDENCE-UNVERIFIED", "WEB-UNVERIFIED")
+
+    inconclusive = _finding(finding_id="WEB-INCONCLUSIVE", evidence_refs=[])
+
+    promoted, report = run_evidence_validation(
+        [verified, unverified, inconclusive], [ev_verified, ev_unverified],
+    )
+
+    by_id = {f.finding_id: f for f in [verified, unverified, inconclusive]}
+    assert by_id["WEB-VERIFIED"].verification_state == "verified"
+    assert by_id["WEB-UNVERIFIED"].verification_state == "unverified"
+    assert by_id["WEB-INCONCLUSIVE"].verification_state == "inconclusive"
+    assert all(f.verifier == "evidence_validator@auto_confirm" for f in by_id.values())
+    assert all(f.verified_at is not None for f in by_id.values())
+
+
 def test_auto_confirmed_report_only_lists_findings_actually_promoted_this_pass():
     """Regression: `auto_confirmed` used to be derived from post-pass status
     alone (`status == CONFIRMED`), which would also count a finding that
     entered the pipeline ALREADY confirmed — mislabelling it as having been
     auto-confirmed by this run. Fixed to compare before/after status."""
     e1 = _evidence("EVIDENCE-001", "WEB-001")
-    e1.raw_data = {"name": "session", "secure": False, "httponly": True}
+    e1.raw_data = {"name": "session", "secure": False, "httponly": True, "url": "http://example.test/", "status_code": 200}
     e2 = _evidence("EVIDENCE-002", "WEB-002")
 
     newly_promoted = _finding(

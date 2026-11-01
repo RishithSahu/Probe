@@ -46,9 +46,20 @@ class Settings(BaseSettings):
 
     # --- Web Security Agent tool integrations ---------------------------------
     katana_binary: str = Field(default="katana")
-    zap_api_url: str = Field(default="http://127.0.0.1:8080")
+    # NOT 8080: that's probe_api_url's default below. A local, non-Docker dev run with both services
+    # pointed at their own defaults would have every ZAP call silently hit Probe's API instead (a 404,
+    # indistinguishable from "ZAP unreachable" other than by reading the response body), falling back to
+    # the synthetic fixture on every single call -- found live, this is the fix. Docker Compose is
+    # unaffected: it sets APE_ZAP_API_URL to http://zap:8080 explicitly, a different hostname.
+    zap_api_url: str = Field(default="http://127.0.0.1:8090")
     zap_api_key: str = Field(default="")
     httpx_timeout_seconds: float = Field(default=10.0)
+    # synthetic_test: documented fixtures may stand in for Katana/ZAP/Ghidra when unavailable (local dev,
+    # deterministic unit tests). live_assessment: nothing here may substitute synthetic data -- a missing
+    # tool must produce an honest incomplete result (see app.core.execution_profile.preflight_check,
+    # which the CLI calls before a --new-assessment/--resume run and refuses to start if this profile is
+    # live_assessment but either *_use_fixtures flag below is still enabled).
+    execution_profile: str = Field(default="synthetic_test")
     web_agent_use_fixtures: bool = Field(
         default=True,
         description="When true, missing external tools (Katana/ZAP) fall back to "

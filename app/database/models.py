@@ -131,6 +131,7 @@ class AgentTaskRecord(Base):
     execution_method: Mapped[str | None] = mapped_column(String(256), nullable=True)
     evidence_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     verification_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    task_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     reservation_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     assessment: Mapped["AssessmentRecord"] = relationship(back_populates="tasks")
@@ -162,6 +163,12 @@ class FindingRecord(Base):
     function_address: Mapped[str | None] = mapped_column(String(32), nullable=True)
     verification_required: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    verification_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verifier: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    verification_evidence_refs: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    verification_explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_integrity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     assessment: Mapped["AssessmentRecord"] = relationship(back_populates="findings")
     evidence: Mapped[list["EvidenceRecord"]] = relationship(back_populates="finding", cascade="all, delete-orphan")

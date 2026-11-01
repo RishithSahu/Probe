@@ -106,6 +106,9 @@ def _load_or_create(
 
 def run(assessment_id: str, scope: str, max_minutes: float, network_graph_path: str | None = None, *,
        probe_port: int = 8080, probe_minutes: float = 5.0, max_inflight: int = 1) -> int:
+    from app.core.execution_profile import preflight_check
+    preflight_check()  # item 9: refuses to start a live_assessment run with fixture fallbacks still enabled
+
     # Unlike app.main's FastAPI service, this standalone CLI never otherwise calls init_db(): a brand-new
     # environment with no evidence/ape.db yet (a genuinely clean run, not a resume) would hit a bare
     # "no such table" OperationalError the moment _load_or_create below reads the database. Base.metadata.

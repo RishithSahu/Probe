@@ -24,6 +24,7 @@ from app.core.schemas import (
 from app.database import repository
 from app.database.session import init_db, session_scope
 from app.orchestrator import autonomous_loop
+from app.orchestrator.task_ids import make_task_id
 
 SLEEP_S = 0.3
 
@@ -84,7 +85,8 @@ def test_four_independent_candidates_run_concurrently_not_sequentially(assessmen
 
     assert len(traces) == 4
     assert {t.task_id for t in traces} == {
-        f"TASK-autonomous-network_vulnerability_detective-{assessment_id}-HOST-{i}:22/tcp" for i in range(4)
+        make_task_id("autonomous", "network_vulnerability_detective", assessment_id, f"HOST-{i}:22/tcp")[0]
+        for i in range(4)
     }
     # four independent candidates, each a SLEEP_S-long "agent call": sequential execution would take
     # ~4 * SLEEP_S; real concurrent dispatch takes ~1 * SLEEP_S. 2x is a generous margin over scheduling/

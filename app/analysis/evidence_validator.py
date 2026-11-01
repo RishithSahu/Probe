@@ -11,7 +11,10 @@ enforced here, once, for the whole system.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
+from app.analysis.protocol_verification import supports_protocol_observation
 from app.core.exceptions import EvidenceValidationError
 from app.core.schemas import Confidence, Evidence, Finding, FindingStatus
 
@@ -26,6 +29,10 @@ from app.core.schemas import Confidence, Evidence, Finding, FindingStatus
 _AUTO_CONFIRM_DETECTION_METHODS = {
     "httpx_header_analysis",
     "httpx_cookie_analysis",
+    "network_vulnerability:ssh_protocol_version",
+    "network_vulnerability:redis_auth_check",
+    "network_vulnerability:postgresql_auth_check",
+    "network_vulnerability:ftp_anonymous_login",
 }
 
 
@@ -139,7 +146,8 @@ def auto_confirm_eligible(
             and id(f) in eligible_objects
             and any(_supports_deterministic_check(f, observations[ref]) for ref in f.evidence_refs)
         ):
-            result.append(promote_finding(f, new_status=FindingStatus.CONFIRMED, reviewer_note="auto-confirmed: deterministic header/cookie check"))
+            verified = promote_finding(f, new_status=FindingStatus.CONFIRMED, reviewer_note="auto-confirmed: deterministic observation replay")
+            result.append(verified.model_copy(update={"verification_status": "verified"}))
         else:
             result.append(f)
     return result
@@ -148,7 +156,12 @@ def auto_confirm_eligible(
 def _supports_deterministic_check(finding: Finding, evidence: Evidence) -> bool:
     """Recheck the observation instead of trusting a method label alone."""
     data = evidence.raw_data or {}
+    if (finding.detection_method or "").startswith("network_vulnerability:"):
+        return supports_protocol_observation(finding, evidence)
     if evidence.source_tool != "httpx" or evidence.evidence_type != "http_response" or data.get("used_fixture"):
+        return False
+    if (not finding.affected_url or data.get("url") != finding.affected_url
+            or type(data.get("status_code")) is not int or not 100 <= data["status_code"] <= 599):
         return False
     if finding.detection_method == "httpx_header_analysis":
         headers = data.get("headers")
@@ -156,7 +169,9 @@ def _supports_deterministic_check(finding: Finding, evidence: Evidence) -> bool:
         if not isinstance(headers, dict) or not isinstance(missing, list) or not missing:
             return False
         present = {str(name).lower() for name in headers}
-        return all(isinstance(name, str) and name.strip() and name.lower() not in present for name in missing)
+        security_headers = {"content-security-policy", "strict-transport-security", "x-content-type-options", "x-frame-options"}
+        return all(isinstance(name, str) and name in security_headers and name not in present
+                   and (name != "strict-transport-security" or urlsplit(finding.affected_url or "").scheme == "https") for name in missing)
     if finding.detection_method == "httpx_cookie_analysis":
         return (
             isinstance(data.get("name"), str) and bool(data["name"].strip())
@@ -165,6 +180,31 @@ def _supports_deterministic_check(finding: Finding, evidence: Evidence) -> bool:
             and (not data["secure"] or not data["httponly"])
         )
     return False
+
+
+_VERIFIER_IDENTITY = "evidence_validator@auto_confirm"
+
+
+def _stamp_verification(findings: list[Finding], report: ValidationReport, auto_confirmed_ids: set[str]) -> None:
+    """Per-finding verification (item 7): a task-level status must never stand in for this -- three
+    findings from one task can land here with three different outcomes. Mutates each Finding in place
+    (verification_state/verified_at/verifier/explanation) so the SAME object `store_findings` later
+    persists already carries it; nothing here changes `status` (confirmed/suspected/rejected), which is a
+    different question answered elsewhere (auto_confirm_eligible)."""
+    now = datetime.now(timezone.utc)
+    invalid_ids = {f.finding_id for f, _ in report.invalid}
+    for f in findings:
+        if f.finding_id in invalid_ids:
+            reason = next((r for item, r in report.invalid if item.finding_id == f.finding_id), "invalid")
+            f.verification_state, f.verification_explanation = "inconclusive", f"evidence validation failed: {reason}"
+        elif f.finding_id in report.incomplete_evidence:
+            f.verification_state, f.verification_explanation = "inconclusive", "evidence present but incomplete (no observation/artifact reference)"
+        elif f.finding_id in auto_confirmed_ids:
+            f.verification_state, f.verification_explanation = "verified", "auto-confirmed: high-confidence detection method with a complete, owned observation"
+        else:
+            f.verification_state, f.verification_explanation = "unverified", "evidence references check out but did not meet the auto-confirmation bar"
+        f.verified_at, f.verifier = now, _VERIFIER_IDENTITY
+        f.verification_evidence_refs = list(f.evidence_refs)
 
 
 def run_evidence_validation(findings: list[Finding], evidence: list[Evidence]) -> tuple[list[Finding], ValidationReport]:
@@ -189,4 +229,5 @@ def run_evidence_validation(findings: list[Finding], evidence: list[Evidence]) -
         f.finding_id for f in promoted
         if f.status == FindingStatus.CONFIRMED and before_by_id.get(f.finding_id) != FindingStatus.CONFIRMED
     ]
+    _stamp_verification(findings, report, set(report.auto_confirmed))
     return promoted, report

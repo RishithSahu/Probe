@@ -104,6 +104,7 @@ def assess_target(
             # Ghidra's analysis -- see findings_from_discovered_endpoints's own docstring.
             ep_findings, ep_evidence = findings_from_discovered_endpoints(
                 crawl_result.endpoints, assessment_id=assessment_id, asset_id=target.asset_id,
+                used_fixture=crawl_result.used_fixture,
             )
             findings.extend(ep_findings)
             evidence.extend(ep_evidence)
@@ -132,7 +133,9 @@ def assess_target(
             tool_executions.append({"tool": "zap_passive", "target": zap_url, "used_fixture": passive.used_fixture})
             if passive.error:
                 errors.append(f"zap_passive({zap_url}): {passive.error}")
-            zap_findings, zap_evidence = findings_from_zap_alerts(passive.alerts, assessment_id=assessment_id, asset_id=target.asset_id)
+            zap_findings, zap_evidence = findings_from_zap_alerts(
+                passive.alerts, assessment_id=assessment_id, asset_id=target.asset_id, used_fixture=passive.used_fixture,
+            )
             findings.extend(zap_findings)
             evidence.extend(zap_evidence)
         except (ScopeViolationError, ToolExecutionError) as exc:
@@ -147,7 +150,9 @@ def assess_target(
                 })
                 if active.error:
                     errors.append(f"zap_active({zap_url}): {active.error}")
-                active_findings, active_evidence = findings_from_zap_alerts(active.alerts, assessment_id=assessment_id, asset_id=target.asset_id)
+                active_findings, active_evidence = findings_from_zap_alerts(
+                    active.alerts, assessment_id=assessment_id, asset_id=target.asset_id, used_fixture=active.used_fixture,
+                )
                 findings.extend(active_findings)
                 evidence.extend(active_evidence)
             except (ScopeViolationError, ToolExecutionError) as exc:

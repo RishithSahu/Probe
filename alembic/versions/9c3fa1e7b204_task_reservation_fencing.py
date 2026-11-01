@@ -1,7 +1,7 @@
 """agent_tasks reservation fencing token
 
 Revision ID: 9c3fa1e7b204
-Revises: 7a1c9e2f4b10
+Revises: 9b2a7f1e3c44
 Create Date: 2026-11-01
 
 Adds reservation_token: a fresh, random value minted by repository.try_reserve_task() on every successful
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "9c3fa1e7b204"
-down_revision = "7a1c9e2f4b10"
+down_revision = "9b2a7f1e3c44"
 branch_labels = None
 depends_on = None
 
