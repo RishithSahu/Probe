@@ -62,10 +62,12 @@ def _task_id_for(assessment_id: str, objective: Candidate) -> tuple[str, str]:
 
 
 def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task_id: str | None, explanation: dict,
-            *, task_fingerprint: str | None = None) -> bool:
+            *, task_fingerprint: str | None = None) -> str | None:
     """Atomically claim `task_id` for this caller (see repository.try_reserve_task) and, iff that succeeds,
     log the dispatch -- so an unsuccessful reservation never produces a log line claiming a dispatch that
-    didn't actually happen."""
+    didn't actually happen. Returns the fresh reservation_token on success (the caller must present it back
+    to every later write for this task_id -- see _execute_objective), or None if the candidate is already
+    running under someone else's reservation."""
     task = AgentTask(
         task_id=task_id, assessment_id=assessment_id, agent_id=objective.agent_id,
         task_type="autonomous_next_objective", parent_task_id=parent_task_id, initiated_by="orchestrator",
@@ -76,27 +78,38 @@ def _reserve(assessment_id: str, objective: Candidate, task_id: str, parent_task
         output_data={"selection": explanation},
         status=TaskStatus.RUNNING, started_at=_now(), task_fingerprint=task_fingerprint,
     )
+    # allow_reclaim=True only when the candidate's OWN generation already positively decided this is a
+    # retry (next_attempt_count > 1 means generate_candidates saw a prior, finished attempt and a reason
+    # to try again) -- never just because this caller's own snapshot happens not to know about one. See
+    # try_reserve_task's own docstring for the race this prevents.
     with session_scope() as db:
-        won = repository.try_reserve_task(db, task)
-        if won:
+        token = repository.try_reserve_task(db, task, allow_reclaim=objective.next_attempt_count > 1)
+        if token:
             repository.log_event(
                 db, assessment_id, AgentId.ORCHESTRATOR.value,
                 f"scheduler selected {objective.candidate_id} (score={explanation.get('selected', {}).get('total_score', 0.0):.2f}, "
                 f"source={objective.source}) -> dispatching {objective.agent_id.value} as {task_id} "
                 f"(parent={parent_task_id})",
             )
-    return won
+    return token
 
 
 def _execute_objective(
-    assessment_id: str, objective: Candidate, task_id: str, parent_task_id: str | None, *,
+    assessment_id: str, objective: Candidate, task_id: str, reservation_token: str, parent_task_id: str | None, *,
     policy: AssessmentPolicy, guard: ScopeGuard, graph: NetworkGraph, output_dir: Path, explanation: dict,
     method_prefix: str = EXECUTION_METHOD, task_fingerprint: str | None = None,
 ) -> IterationTrace:
     """Run the already-reserved `objective` to completion and persist the result. Safe to call from a
     worker thread: everything it touches is either a value passed in (its own `guard`, built fresh per
     objective -- see run_concurrent_iteration) or a brand-new `with session_scope() as db:` block (a new
-    SQLAlchemy Session per call, never shared across threads)."""
+    SQLAlchemy Session per call, never shared across threads).
+
+    Every write to the task row below goes through `repository.try_complete_task(..., reservation_token)`,
+    never the plain `upsert_agent_task` -- item 7 of the concurrency spec: `run_concurrently()`'s shared
+    timeout cannot force-kill a thread that is still running an agent call. If this exact call is the
+    straggler that timeout already gave up on and reported FAILED to the caller, and by the time it
+    finally finishes a retry has reserved the same task_id under a NEW token, `try_complete_task` is a
+    no-op here -- the stale write is dropped instead of silently clobbering the retry's real result."""
     method = method_prefix
     try:
         if objective.agent_id == AgentId.WEB_SECURITY:
@@ -114,13 +127,13 @@ def _execute_objective(
             method = f"{method_prefix} -> run_network_vulnerability_agent"
     except Exception as exc:  # noqa: BLE001 - a dispatched agent failing is a FAILED task, not a crash of the loop
         with session_scope() as db:
-            repository.upsert_agent_task(db, AgentTask(
-                task_id=task_id, assessment_id=assessment_id, agent_id=objective.agent_id,
-                task_type="autonomous_next_objective", parent_task_id=parent_task_id, initiated_by="orchestrator",
-                execution_method=method, output_data={"selection": explanation},
-                input_data={"asset_id": objective.asset_id, "service_id": objective.service_id, "finding_count_at_dispatch": objective.backing_findings_count, "attempt_count": objective.next_attempt_count},
-                status=TaskStatus.FAILED, error_message=str(exc), completed_at=_now(), task_fingerprint=task_fingerprint,
-            ))
+            accepted = repository.try_complete_task(
+                db, task_id, reservation_token,
+                status=TaskStatus.FAILED.value, error_message=str(exc)[:2000], completed_at=_now(),
+                execution_method=method, output_data={"selection": explanation}, task_fingerprint=task_fingerprint,
+            )
+        if not accepted:
+            logger.warning("task %s: stale reservation_token on failure write -- a retry already reclaimed it", task_id)
         return IterationTrace(task_id=task_id, parent_task_id=parent_task_id, agent_id=objective.agent_id,
                               objective=objective, blocked_reason=f"agent execution failed: {exc}",
                               selection_explanation=explanation)
@@ -162,22 +175,25 @@ def _execute_objective(
             repository.store_findings(db, verified_findings, result.evidence)
         for record in guard.audit_log:
             repository.store_tool_invocation_log(db, assessment_id, "scope_guard", record)
-        repository.upsert_agent_task(db, AgentTask(
-            task_id=task_id, assessment_id=assessment_id, agent_id=objective.agent_id,
-            task_type="autonomous_next_objective", parent_task_id=parent_task_id, initiated_by="orchestrator",
+        accepted = repository.try_complete_task(
+            db, task_id, reservation_token,
             execution_method=method,
-            input_data={"asset_id": objective.asset_id, "service_id": objective.service_id, "finding_count_at_dispatch": objective.backing_findings_count, "attempt_count": objective.next_attempt_count},
             output_data={"findings_count": len(verified_findings), "selection": explanation},
             evidence_ids=[e.evidence_id for e in result.evidence],
             verification_status=verification_status,
-            status=task_status,
+            status=task_status.value,
             error_message="; ".join(result.errors) or None, completed_at=_now(), task_fingerprint=task_fingerprint,
-        ))
-        repository.log_event(
-            db, assessment_id, AgentId.ORCHESTRATOR.value,
-            f"{task_id} {task_status.value}: {len(verified_findings)} finding(s) "
-            f"({binary_findings_count} via web-to-binary handoff), verification={verification_status}",
         )
+        if accepted:
+            repository.log_event(
+                db, assessment_id, AgentId.ORCHESTRATOR.value,
+                f"{task_id} {task_status.value}: {len(verified_findings)} finding(s) "
+                f"({binary_findings_count} via web-to-binary handoff), verification={verification_status}",
+            )
+    if not accepted:
+        logger.warning("task %s: stale reservation_token on completion write -- a retry already reclaimed it "
+                       "(the findings above were still stored; only this task row's bookkeeping was skipped)",
+                       task_id)
 
     return IterationTrace(task_id=task_id, parent_task_id=parent_task_id, agent_id=objective.agent_id,
                           objective=objective, findings_count=len(verified_findings),
@@ -209,7 +225,8 @@ def run_next_iteration(
                               selection_explanation=explanation)
 
     task_id, task_fingerprint = _task_id_for(assessment_id, objective)
-    if not _reserve(assessment_id, objective, task_id, parent_task_id, explanation, task_fingerprint=task_fingerprint):
+    reservation_token = _reserve(assessment_id, objective, task_id, parent_task_id, explanation, task_fingerprint=task_fingerprint)
+    if not reservation_token:
         # Lost the reservation race (another dispatcher -- another thread of a concurrent run, or a
         # separate process against a shared database -- already has this exact candidate RUNNING right
         # now). This is not an error: the same deduplication that stops a concurrent scheduler from running
@@ -219,9 +236,21 @@ def run_next_iteration(
                               blocked_reason=f"candidate {objective.candidate_id} is already running under another reservation",
                               selection_explanation=explanation)
 
-    return _execute_objective(assessment_id, objective, task_id, parent_task_id, policy=policy, guard=guard,
-                              graph=graph, output_dir=output_dir, explanation=explanation,
+    return _execute_objective(assessment_id, objective, task_id, reservation_token, parent_task_id, policy=policy,
+                              guard=guard, graph=graph, output_dir=output_dir, explanation=explanation,
                               task_fingerprint=task_fingerprint)
+
+
+def _surface_caps() -> dict[str, int]:
+    """Per-surface concurrency limits (item 6): separate resource pools so one surface's own tool cost
+    can't starve the others out of the shared `max_inflight` budget -- a slow Ghidra analysis must not be
+    able to consume every slot that would otherwise go to Web or Network tasks."""
+    from app.core.config import settings
+    return {
+        AgentId.WEB_SECURITY.value: settings.max_concurrent_web_tasks,
+        AgentId.NETWORK_VULNERABILITY_DETECTIVE.value: settings.max_concurrent_network_tasks,
+        AgentId.BINARY_ANALYSIS.value: settings.max_concurrent_binary_tasks,
+    }
 
 
 def run_concurrent_iteration(
@@ -235,11 +264,26 @@ def run_concurrent_iteration(
     three independent services are eligible right now, up to `max_inflight` of them are sent to their
     agents at once, not one iteration apart. Each reserved objective gets its OWN fresh `ScopeGuard`
     (cheap to construct, no I/O) rather than sharing one across threads, so concurrent tool-invocation
-    logging from different objectives is never interleaved onto the same guard's audit_log."""
+    logging from different objectives is never interleaved onto the same guard's audit_log.
+
+    Two further resource rules (item 6), enforced while deciding what to reserve, not after:
+      - per-surface caps (`_surface_caps()`): a candidate is skipped (not reserved) if its agent/surface
+        already has as many tasks RUNNING right now (counted from the task ledger, plus whatever this same
+        call has already reserved) as its configured limit allows -- this is a soft, best-effort bound
+        under heavy cross-call concurrency (two overlapping calls could each read the ledger before either
+        one's reservations land), but the hard guarantee -- no candidate is ever run twice -- is completely
+        unaffected by that, since it is still enforced by try_reserve_task's own atomicity, not by this count.
+      - one task per target at a time: this call never reserves two candidates against the SAME asset_id
+        together, so one host is never hit by two agents simultaneously from a single dispatch."""
     with session_scope() as db:
         graph = repository.load_network_graph(db, assessment_id)
-        existing_task_inputs = [dict(t.input_data or {}) for t in repository.list_agent_tasks(db, assessment_id)]
+        all_tasks = repository.list_agent_tasks(db, assessment_id)
+        existing_task_inputs = [dict(t.input_data or {}) for t in all_tasks]
         findings = [repository.finding_to_schema(f) for f in repository.list_findings(db, assessment_id)]
+        running_by_agent: dict[str, int] = {}
+        for t in all_tasks:
+            if t.status == TaskStatus.RUNNING.value:
+                running_by_agent[t.agent_id] = running_by_agent.get(t.agent_id, 0) + 1
 
     if graph is None:
         return [IterationTrace(task_id="", parent_task_id=parent_task_id, agent_id=None, objective=None,
@@ -256,13 +300,23 @@ def run_concurrent_iteration(
 
     explanation_for = {c.candidate_id: {"selected": c.explanation(), "considered": [c.explanation() for c in ranked]}
                        for c in ranked}
-    reserved: list[tuple[Candidate, str, str]] = []
+    surface_caps = _surface_caps()
+    reserved: list[tuple[Candidate, str, str, str]] = []
+    reserved_assets: set[str] = set()
     for c in ranked:
         if len(reserved) >= max(1, max_inflight):
             break
+        cap = surface_caps.get(c.agent_id.value)
+        if cap is not None and running_by_agent.get(c.agent_id.value, 0) >= cap:
+            continue  # this surface's pool is already full -- try the next candidate, maybe a different surface
+        if c.asset_id in reserved_assets:
+            continue  # don't send two agents at the same target together in one dispatch
         task_id, task_fingerprint = _task_id_for(assessment_id, c)
-        if _reserve(assessment_id, c, task_id, parent_task_id, explanation_for[c.candidate_id], task_fingerprint=task_fingerprint):
-            reserved.append((c, task_id, task_fingerprint))
+        token = _reserve(assessment_id, c, task_id, parent_task_id, explanation_for[c.candidate_id], task_fingerprint=task_fingerprint)
+        if token:
+            reserved.append((c, task_id, token, task_fingerprint))
+            running_by_agent[c.agent_id.value] = running_by_agent.get(c.agent_id.value, 0) + 1
+            reserved_assets.add(c.asset_id)
 
     if not reserved:
         return [IterationTrace(
@@ -272,16 +326,17 @@ def run_concurrent_iteration(
             selection_explanation={"considered": [c.explanation() for c in ranked]},
         )]
 
-    def _run(objective: Candidate, task_id: str, task_fingerprint: str) -> IterationTrace:
+    def _run(objective: Candidate, task_id: str, token: str, task_fingerprint: str) -> IterationTrace:
         return _execute_objective(
-            assessment_id, objective, task_id, parent_task_id, policy=policy, guard=ScopeGuard(policy, graph),
+            assessment_id, objective, task_id, token, parent_task_id, policy=policy, guard=ScopeGuard(policy, graph),
             graph=graph, output_dir=output_dir, explanation=explanation_for[objective.candidate_id],
             method_prefix=CONCURRENT_EXECUTION_METHOD, task_fingerprint=task_fingerprint,
         )
 
     traces: list[IterationTrace] = []
     with ThreadPoolExecutor(max_workers=len(reserved)) as pool:
-        futures = [pool.submit(_run, objective, task_id, task_fingerprint) for objective, task_id, task_fingerprint in reserved]
+        futures = [pool.submit(_run, objective, task_id, token, task_fingerprint)
+                  for objective, task_id, token, task_fingerprint in reserved]
         for future in as_completed(futures):
             traces.append(future.result())
     return traces

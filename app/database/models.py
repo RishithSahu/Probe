@@ -132,6 +132,7 @@ class AgentTaskRecord(Base):
     evidence_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     verification_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     task_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    reservation_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     assessment: Mapped["AssessmentRecord"] = relationship(back_populates="tasks")
 

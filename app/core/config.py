@@ -70,6 +70,18 @@ class Settings(BaseSettings):
     agent_task_timeout_seconds: float = Field(default=600.0)
     max_concurrent_agent_tasks: int = Field(default=4)
 
+    # Per-surface concurrency limits for app.orchestrator.autonomous_loop.run_concurrent_iteration --
+    # separate resource pools so one surface's own tool cost can't starve the others out of the shared
+    # max_inflight budget (a slow Ghidra analysis must not consume all available Web/Network capacity).
+    # The effective cap on a dispatch call is min(max_inflight, this surface's own limit, 1-per-target).
+    max_concurrent_web_tasks: int = Field(default=3, description="Cap on simultaneously RUNNING Web Security tasks.")
+    max_concurrent_network_tasks: int = Field(
+        default=3, description="Cap on simultaneously RUNNING Network Vulnerability Detective tasks."
+    )
+    max_concurrent_binary_tasks: int = Field(
+        default=2, description="Cap on simultaneously RUNNING Binary Analysis tasks (Ghidra is the heaviest tool here)."
+    )
+
     # When set, the Orchestrator dispatches to these as remote FastAPI
     # services (see app/agents/*/service.py, Dockerfile.web, Dockerfile.binary)
     # over HTTP instead of calling the agent's Python module in-process. This

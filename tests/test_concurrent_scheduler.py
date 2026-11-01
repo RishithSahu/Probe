@@ -10,6 +10,7 @@ import uuid
 
 import pytest
 
+from app.core.config import settings
 from app.core.schemas import (
     AgentId,
     AgentResult,
@@ -71,6 +72,10 @@ def _slow_stub(*_a, **kw):
 def test_four_independent_candidates_run_concurrently_not_sequentially(assessment, monkeypatch, tmp_path):
     assessment_id, policy = assessment
     monkeypatch.setattr(autonomous_loop, "run_network_vulnerability_agent", _slow_stub)
+    # this test is about proving real parallel dispatch, not the per-surface cap added alongside it --
+    # raise the cap so all four of this test's candidates are eligible to run together (see
+    # test_per_surface_cap_limits_how_many_of_one_surface_run_at_once for the cap itself).
+    monkeypatch.setattr(settings, "max_concurrent_network_tasks", 4)
 
     start = time.monotonic()
     traces = autonomous_loop.run_concurrent_iteration(
@@ -92,6 +97,65 @@ def test_four_independent_candidates_run_concurrently_not_sequentially(assessmen
         tasks = {t.task_id: t.status for t in repository.list_agent_tasks(db, assessment_id)}
     assert len(tasks) == 4
     assert all(status == TaskStatus.COMPLETED.value for status in tasks.values())
+
+
+def test_per_surface_cap_limits_how_many_of_one_surface_run_at_once(assessment, monkeypatch, tmp_path):
+    """Item 6: a per-surface concurrency limit, independent of max_inflight. All four candidates are
+    Network Vulnerability Detective work (the fixture's four assets are all plain TCP services), so capping
+    max_concurrent_network_tasks must limit the batch even though max_inflight itself would allow more."""
+    assessment_id, policy = assessment
+    monkeypatch.setattr(autonomous_loop, "run_network_vulnerability_agent", _slow_stub)
+    monkeypatch.setattr(settings, "max_concurrent_network_tasks", 2)
+
+    traces = autonomous_loop.run_concurrent_iteration(
+        assessment_id, policy=policy, output_dir=tmp_path / "out", max_inflight=4,
+    )
+    assert len(traces) == 2, "the per-surface cap (2) must win over max_inflight (4) for this all-one-surface batch"
+
+    # once those two finish (COMPLETED, no longer RUNNING), the surface's pool has room again
+    traces2 = autonomous_loop.run_concurrent_iteration(
+        assessment_id, policy=policy, output_dir=tmp_path / "out", max_inflight=4,
+    )
+    assert len(traces2) == 2
+    assert {t.task_id for t in traces} & {t.task_id for t in traces2} == set()
+
+
+def test_candidates_on_the_same_target_are_not_dispatched_together(tmp_path, monkeypatch):
+    """Item 6: one task per target at a time within a single dispatch call -- two services on the SAME
+    asset must not both be sent to agents simultaneously from one run_concurrent_iteration call."""
+    from app.core.config import settings as cfg
+    from app.core.schemas import Assessment, AssessmentPolicy, AssessmentStatus, NetworkGraph
+
+    monkeypatch.setattr(cfg, "evidence_dir", tmp_path / "evidence")
+    init_db()
+    assessment_id = f"ASSESSMENT-CONC-{uuid.uuid4().hex[:8]}"
+    asset = NetworkGraphAssetRecord(
+        asset_id="HOST-SHARED", ip="10.20.30.50",
+        services=[
+            NetworkGraphServiceRecord(service_id="HOST-SHARED:22/tcp", asset_id="HOST-SHARED", port=22, protocol="tcp", service_name="ssh"),
+            NetworkGraphServiceRecord(service_id="HOST-SHARED:3306/tcp", asset_id="HOST-SHARED", port=3306, protocol="tcp", service_name="mysql"),
+        ],
+    )
+    graph = NetworkGraph(scope_id="SCOPE-TEST", assets=[asset])
+    policy = AssessmentPolicy(allow_network_service_assessment=True, dry_run=False, approved_asset_ids=["HOST-SHARED"])
+    with session_scope() as db:
+        repository.create_assessment(db, Assessment(
+            assessment_id=assessment_id, scope_id=graph.scope_id, status=AssessmentStatus.RUNNING, assessment_policy=policy,
+        ))
+        repository.store_network_graph(db, assessment_id, graph)
+
+    monkeypatch.setattr(autonomous_loop, "run_network_vulnerability_agent", _slow_stub)
+
+    traces = autonomous_loop.run_concurrent_iteration(
+        assessment_id, policy=policy, output_dir=tmp_path / "out", max_inflight=4,
+    )
+    assert len(traces) == 1, "two services on the same asset must not both be reserved in one dispatch call"
+
+    traces2 = autonomous_loop.run_concurrent_iteration(
+        assessment_id, policy=policy, output_dir=tmp_path / "out", max_inflight=4,
+    )
+    assert len(traces2) == 1
+    assert {t.task_id for t in traces} & {t.task_id for t in traces2} == set()
 
 
 def test_max_inflight_caps_how_many_run_at_once(assessment, monkeypatch, tmp_path):
